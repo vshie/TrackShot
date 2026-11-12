@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
+if sys.platform != "darwin":
+    pytest.skip("Mach-O binaries are macOS only", allow_module_level=True)
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("macho_minos", ROOT / "packaging" / "macho_minos.py")
 macho_minos = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(macho_minos)
-
-pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="Mach-O binaries are macOS only")
-
 
 def interpreter_binary() -> Path:
     return Path(sys.executable).resolve()

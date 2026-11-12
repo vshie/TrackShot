@@ -26,7 +26,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: macos-arm64
           - os: ubuntu-22.04          # glibc 2.35: the build runs on 22.04 and newer
             target: linux-x86_64
