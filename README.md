@@ -1,6 +1,7 @@
 # TrackShot
 
-TrackShot runs **visual-inertial odometry (VIO) topside**, on the ROV pilot's Mac, rather than on
+TrackShot runs **visual-inertial odometry (VIO) topside**, on the ROV pilot's computer (macOS,
+Linux or Windows), rather than on
 the ROV's Raspberry Pi. It connects straight to the ROV's OAK-D over the tether, runs depthai's VIO
 (RTAB-Map or Basalt) on the surface computer, and sends `VISION_POSITION_DELTA` to ArduSub, so
 POSHOLD and other position modes work without GPS. It also records survey images (centre camera
@@ -22,10 +23,28 @@ OAK-D (PoE, on the ROV) ──tether──► Mac: TrackShot ── VIO ── o
 
 The code layout and module contracts are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Download
+
+Builds for **macOS (Apple silicon)**, **Linux (x86_64)** and **Windows (x64)** are on the
+[Releases page](https://github.com/vshie/TrackShot/releases). Every push to `main` builds all three
+in GitHub Actions (`.github/workflows/build.yml`); a `v*` tag publishes them as a release.
+
+- **macOS:** unzip and move `TrackShot.app` to Applications. It is ad-hoc signed, so the first
+  launch needs right-click → Open (or `xattr -dr com.apple.quarantine TrackShot.app`). Allow
+  **Local Network** access when asked.
+- **Linux:** `tar xzf TrackShot-*-linux-x86_64.tar.gz` and run `./TrackShot/TrackShot`. Needs
+  glibc 2.35 or newer (Ubuntu 22.04+) and the usual X11/Wayland desktop libraries.
+- **Windows:** unzip and run `TrackShot\TrackShot.exe`. Allow it through Windows Firewall on
+  private networks. depthai's Windows build has RTAB-Map only (no Basalt).
+
+The repo also carries [`ardupilot/gps_depth_gate.lua`](ardupilot/gps_depth_gate.lua), an ArduSub
+script that uses GPS only at the surface and ignores it underwater (see the header of the file
+for the parameters it needs).
+
 ## Requirements
 
-- **macOS on Apple silicon (arm64)**. This is the only target so far. Running from source works
-  wherever your Python, PySide6 and depthai wheels do. The built app needs at least the macOS its
+- **macOS on Apple silicon (arm64), Linux x86_64 or Windows x64.** Running from source works
+  wherever your Python, PySide6 and depthai wheels do. On macOS, the built app needs at least the macOS its
   bundled binaries were built for: the build sets `LSMinimumSystemVersion` from them and prints
   it. Built from Homebrew's Python, that is the build Mac's own macOS version (Homebrew compiles
   for the running system), and PySide6 6.12's wheels need macOS 14 or later. To build an app for
@@ -105,9 +124,23 @@ can't feed a survey that isn't happening into a real EKF.
 
 ## Build the app
 
+GitHub Actions builds all three platforms (`.github/workflows/build.yml`). Locally, on a Mac:
+
 ```sh
 scripts/build_macos.sh
 ```
+
+On Linux or Windows, after the install above:
+
+```sh
+.venv/bin/python -m PyInstaller --noconfirm --clean packaging/trackshot.spec   # → dist/TrackShot/
+QT_QPA_PLATFORM=offscreen dist/TrackShot/TrackShot --self-test
+```
+
+On Windows the exe is windowed and has no console output: set `TRACKSHOT_SELFTEST_LOG` to a file
+path to get the self-test report there.
+
+What `build_macos.sh` does:
 
 The script runs these steps:
 
@@ -117,7 +150,7 @@ The script runs these steps:
 4. Signs the bundle ad hoc.
 5. Runs the bundle's own self-test: `TrackShot.app/Contents/MacOS/TrackShot --self-test` builds both VIO nodes without a camera and pushes simulated poses through the odometry and the MAVLink encoder.
 
-The icon is drawn by `scripts/make_icon.py`. Running it regenerates `src/trackshot/resources/icon.png` and `packaging/TrackShot.icns`.
+The icon is drawn by `scripts/make_icon.py`. Running it regenerates `src/trackshot/resources/icon.png`, `packaging/TrackShot.ico` and (on macOS) `packaging/TrackShot.icns`.
 
 ## Vehicle setup
 
@@ -236,8 +269,10 @@ capture runs at most at the VIO frame rate, because its pairs come from the VIO 
 
 ## Known limitations
 
-- **macOS arm64 only for now.** Windows and Linux are planned. depthai's Windows wheel has
-  RTAB-Map but **no Basalt**. TrackShot asks depthai which backends exist instead of assuming them.
+- **Linux and Windows builds are tested only by CI** (unit tests and the bundle self-test), not
+  yet with a real camera or vehicle. Field testing so far has been on macOS. depthai's Windows
+  wheel has RTAB-Map but **no Basalt**; TrackShot asks depthai which backends exist instead of
+  assuming them.
 - **The app is unsigned** (ad-hoc signed). On another Mac, Gatekeeper blocks it: right-click
   the app and choose Open, then confirm. On first connect, macOS asks for **Local Network** access;
   allow it, or TrackShot can't reach the camera or the vehicle.

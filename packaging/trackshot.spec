@@ -1,8 +1,10 @@
-# PyInstaller spec for TrackShot.app: macOS arm64, onedir, windowed.
+# PyInstaller spec for TrackShot: onedir, windowed. macOS arm64 → TrackShot.app; Linux and Windows →
+# a TrackShot/ folder with the TrackShot (or TrackShot.exe) launcher.
 #
 #     .venv/bin/pyinstaller --noconfirm --clean packaging/trackshot.spec
 #
-# (scripts/build_macos.sh runs the tests, this spec, ad-hoc signing and the bundle's self-test.)
+# (scripts/build_macos.sh runs the tests, this spec, ad-hoc signing and the bundle's self-test;
+# .github/workflows/build.yml builds all three platforms.)
 #
 # What needs care, and why:
 # - depthai is a single extension module (depthai.cpython-3XX-darwin.so) linking
@@ -12,6 +14,9 @@
 #   future wheel loads one with dlopen. collect_all('depthai') finds nothing in 3.12 (a single
 #   module is not a package) but is kept for later wheels, filtered to the running interpreter's
 #   extension suffix: the wheel carries a .so for every Python version (~50 MB we don't want).
+#   On Linux and Windows the native libraries sit in a sibling folder the wheel repair tool made
+#   (auditwheel/delvewheel: depthai.libs or similar) or next to the module; those are bundled
+#   under the same relative folder so the extension's RPATH / DLL search still finds them.
 # - pymavlink imports its dialect modules by name at runtime (mavutil.set_dialect), which static
 #   analysis can't see: the dialects TrackShot uses are listed as hidden imports.
 # - PySide6 is 1.2 GB installed; only QtCore/QtGui/QtWidgets (+ what pyqtgraph touches) are used,
@@ -20,6 +25,7 @@
 # - LSMinimumSystemVersion is the highest deployment target (minos) among the bundled binaries
 #   (macho_minos.py), not a hopeful constant: a Homebrew Python is built for the macOS it was
 #   compiled on, and dyld refuses it on anything older. build_macos.sh re-checks the bundle.
+#   The .app bundle, minos and arm64 target apply on macOS only.
 
 import importlib.machinery
 import sys
@@ -29,10 +35,11 @@ from PyInstaller.utils.hooks import collect_all, copy_metadata
 
 ROOT = Path(SPECPATH).parent          # noqa: F821 - SPECPATH is defined by PyInstaller
 SRC = ROOT / "src"
-ICON = ROOT / "packaging" / "TrackShot.icns"
+MACOS = sys.platform == "darwin"
+WINDOWS = sys.platform == "win32"
+ICON = ROOT / "packaging" / ("TrackShot.icns" if MACOS else "TrackShot.ico")
 sys.path.insert(0, str(SRC))
 sys.path.insert(0, SPECPATH)          # noqa: F821
-from macho_minos import required_macos  # noqa: E402
 from trackshot.__main__ import APP_NAME, app_version  # noqa: E402
 
 VERSION = app_version()
@@ -52,8 +59,20 @@ dai_datas = [d for d in dai_datas if wanted(d)]
 dai_binaries = [b for b in dai_binaries if wanted(b)]
 import depthai  # noqa: E402
 
-dylibs = Path(depthai.__file__).parent / "palace.dylibs"
-dai_binaries += [(str(lib), "palace.dylibs") for lib in sorted(dylibs.glob("*.dylib"))]
+site = Path(depthai.__file__).parent
+NATIVE = ("*.dylib", "*.so", "*.so.*", "*.dll", "*.pyd")
+for libdir in [site / "palace.dylibs", *sorted(site.glob("depthai*.libs"))]:
+    if libdir.is_dir():
+        for pattern in NATIVE:
+            dai_binaries += [(str(lib), libdir.name) for lib in sorted(libdir.glob(pattern))]
+if WINDOWS:
+    # depthai is a single module in site-packages, so DLLs the wheel puts beside it land in
+    # site-packages itself: take only depthai's own (by name), not every package's
+    DAI_DLL_PREFIXES = ("depthai", "libdepthai", "dynamic", "libdynamic", "libusb")
+    dai_binaries += [(str(lib), ".") for lib in sorted(site.glob("*.dll"))
+                     if lib.name.lower().startswith(DAI_DLL_PREFIXES)]
+dai_binaries = list(dict.fromkeys(dai_binaries))
+print(f"depthai native libraries bundled: {len(dai_binaries)}")
 
 # --- Python-level ---------------------------------------------------------------------------------
 hiddenimports = dai_hidden + [
@@ -96,7 +115,8 @@ excludes = [
 
 # Qt plugins PyInstaller's PySide6 hook collects by default that drag in frameworks TrackShot never
 # uses: the virtual keyboard (→ QtQuick/QtQml) and the PDF image format (→ QtPdf). ~25 MB.
-UNUSED_QT = ("QtVirtualKeyboard", "QtQuick", "QtQml", "QtPdf", "libqtvirtualkeyboardplugin", "libqpdf")
+UNUSED_QT = ("QtVirtualKeyboard", "QtQuick", "QtQml", "QtPdf", "libqtvirtualkeyboardplugin", "libqpdf",
+             "Qt6VirtualKeyboard", "Qt6Quick", "Qt6Qml", "Qt6Pdf", "qtvirtualkeyboardplugin", "qpdf.dll")
 
 
 def keep_qt(entry) -> bool:
@@ -114,8 +134,10 @@ a = Analysis(  # noqa: F821
 a.binaries = [b for b in a.binaries if keep_qt(b)]
 a.datas = [d for d in a.datas if keep_qt(d)]
 pyz = PYZ(a.pure)  # noqa: F821
-MIN_MACOS = required_macos(Path(entry[1]) for entry in a.binaries)
-print(f"TrackShot.app needs macOS {MIN_MACOS} or later (the bundled binaries' highest minos)")
+if MACOS:
+    from macho_minos import required_macos  # noqa: E402
+    MIN_MACOS = required_macos(Path(entry[1]) for entry in a.binaries)
+    print(f"TrackShot.app needs macOS {MIN_MACOS} or later (the bundled binaries' highest minos)")
 
 exe = EXE(  # noqa: F821
     pyz,
@@ -125,11 +147,11 @@ exe = EXE(  # noqa: F821
     name=APP_NAME,
     console=False,
     argv_emulation=False,
-    target_arch="arm64",
+    target_arch="arm64" if MACOS else None,
     upx=False,
     codesign_identity=None,       # build_macos.sh signs the finished bundle ad hoc
     entitlements_file=None,
-    icon=str(ICON),
+    icon=str(ICON) if (MACOS or WINDOWS) else None,
 )
 
 coll = COLLECT(  # noqa: F821
@@ -141,25 +163,26 @@ coll = COLLECT(  # noqa: F821
     name=APP_NAME,
 )
 
-app = BUNDLE(  # noqa: F821
-    coll,
-    name=f"{APP_NAME}.app",
-    icon=str(ICON),
-    bundle_identifier="com.bluerobotics.trackshot",
-    version=VERSION,
-    info_plist={
-        "CFBundleName": APP_NAME,
-        "CFBundleDisplayName": APP_NAME,
-        "CFBundleShortVersionString": VERSION,
-        "CFBundleVersion": VERSION,
-        "LSMinimumSystemVersion": MIN_MACOS,
-        "LSApplicationCategoryType": "public.app-category.utilities",
-        "NSHighResolutionCapable": True,
-        "NSRequiresAquaSystemAppearance": False,     # follow the system's dark mode
-        # macOS 15+ blocks LAN traffic for apps without this (and the user's consent)
-        "NSLocalNetworkUsageDescription": (
-            "TrackShot connects to the ROV's OAK-D camera and to the autopilot (BlueOS) over the "
-            "tether's local network to run visual odometry and send position updates."),
-        "NSHumanReadableCopyright": "TrackShot",
-    },
-)
+if MACOS:
+    app = BUNDLE(  # noqa: F821
+        coll,
+        name=f"{APP_NAME}.app",
+        icon=str(ICON),
+        bundle_identifier="com.bluerobotics.trackshot",
+        version=VERSION,
+        info_plist={
+            "CFBundleName": APP_NAME,
+            "CFBundleDisplayName": APP_NAME,
+            "CFBundleShortVersionString": VERSION,
+            "CFBundleVersion": VERSION,
+            "LSMinimumSystemVersion": MIN_MACOS,
+            "LSApplicationCategoryType": "public.app-category.utilities",
+            "NSHighResolutionCapable": True,
+            "NSRequiresAquaSystemAppearance": False,     # follow the system's dark mode
+            # macOS 15+ blocks LAN traffic for apps without this (and the user's consent)
+            "NSLocalNetworkUsageDescription": (
+                "TrackShot connects to the ROV's OAK-D camera and to the autopilot (BlueOS) over the "
+                "tether's local network to run visual odometry and send position updates."),
+            "NSHumanReadableCopyright": "TrackShot",
+        },
+    )

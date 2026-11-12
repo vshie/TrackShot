@@ -99,7 +99,43 @@ def configure_logging() -> Path | None:
 
 def self_test() -> int:
     """Exercises everything a broken bundle would lose (native libraries, data files, dynamically
-    imported modules), without a window, a camera or a vehicle. Exit 0 when all is well."""
+    imported modules), without a window, a camera or a vehicle. Exit 0 when all is well.
+
+    With TRACKSHOT_SELFTEST_LOG set, the report is also written to that file: a windowed Windows
+    exe has no stdout to print to."""
+    log_file = os.environ.get("TRACKSHOT_SELFTEST_LOG")
+    if log_file:
+        sys.stdout = _Tee(sys.stdout, open(log_file, "w", encoding="utf-8"))
+    try:
+        return _self_test()
+    finally:
+        if isinstance(sys.stdout, _Tee):
+            sys.stdout.close_file()
+            sys.stdout = sys.stdout.console
+
+
+class _Tee:
+    """stdout that also writes to a file; the console side may be None (windowed Windows exe)."""
+
+    def __init__(self, console, file):
+        self.console, self.file = console, file
+
+    def write(self, text: str) -> int:
+        if self.console is not None:
+            self.console.write(text)
+        self.file.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        if self.console is not None:
+            self.console.flush()
+        self.file.flush()
+
+    def close_file(self) -> None:
+        self.file.close()
+
+
+def _self_test() -> int:
     ok = True
     logger.remove()   # just the results on stdout; warnings and errors still reach stderr
     logger.add(sys.stderr, level="WARNING")

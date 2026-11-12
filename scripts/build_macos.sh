@@ -4,6 +4,7 @@
 #
 #     scripts/build_macos.sh            # full build
 #     SKIP_TESTS=1 scripts/build_macos.sh
+#     PYTHON=/path/to/python scripts/build_macos.sh   # e.g. CI: an interpreter other than .venv's
 #
 # The app is signed ad hoc ("-"), which is enough to launch it on this Mac. On another Mac,
 # Gatekeeper will refuse it until it is opened with right-click → Open (or signed and notarised
@@ -12,7 +13,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-PY="$ROOT/.venv/bin/python"
+PY="${PYTHON:-$ROOT/.venv/bin/python}"
 APP="$ROOT/dist/TrackShot.app"
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
@@ -20,7 +21,7 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
     exit 1
 fi
 if [[ ! -x "$PY" ]]; then
-    echo "No .venv: python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'" >&2
+    echo "No Python at $PY: python3 -m venv .venv && .venv/bin/pip install -e '.[dev]' (or set PYTHON)" >&2
     exit 1
 fi
 

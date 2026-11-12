@@ -1,0 +1,158 @@
+# Builds TrackShot for macOS (arm64), Linux (x86_64) and Windows (x64): tests, PyInstaller, and the
+# bundle's own --self-test on each. A v* tag also publishes the three builds as a GitHub release.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  PYTHON_VERSION: "3.14"
+  QT_QPA_PLATFORM: offscreen      # tests and the self-test run without a display
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: macos-arm64
+          - os: ubuntu-22.04          # glibc 2.35: the build runs on 22.04 and newer
+            target: linux-x86_64
+          - os: windows-2022
+            target: windows-x64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Linux libraries for Qt
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libegl1 libgl1 libglib2.0-0 libfontconfig1 libdbus-1-3 libxkbcommon0 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xfixes0 libusb-1.0-0
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Version
+        id: version
+        run: echo "version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")" >> "$GITHUB_OUTPUT"
+
+      - name: depthai layout
+        run: |
+          python - <<'EOF'
+          import depthai, pathlib
+          from trackshot import capabilities
+          site = pathlib.Path(depthai.__file__).parent
+          print("module:", depthai.__file__)
+          for p in sorted(site.iterdir()):
+              if p.name.lower().startswith(("depthai", "palace", "libdepthai", "libusb", "dynamic", "libdynamic")):
+                  print(" ", p.name, "(dir)" if p.is_dir() else "")
+                  if p.is_dir():
+                      for q in sorted(p.iterdir()):
+                          print("     ", q.name)
+          print(capabilities.describe())
+          EOF
+
+      - name: Tests
+        run: python -m pytest -q
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        # build_macos.sh also checks the minimum macOS, signs ad hoc and runs the bundle self-test
+        run: PYTHON="$(command -v python)" SKIP_TESTS=1 scripts/build_macos.sh
+
+      - name: Build (Linux, Windows)
+        if: runner.os != 'macOS'
+        run: python -m PyInstaller --noconfirm --clean --log-level WARN packaging/trackshot.spec
+
+      - name: Bundle self-test (Linux)
+        if: runner.os == 'Linux'
+        run: dist/TrackShot/TrackShot --self-test
+
+      - name: Bundle self-test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # A windowed exe has no stdout: the report goes to a file instead
+        run: |
+          $env:TRACKSHOT_SELFTEST_LOG = "$PWD\selftest.txt"
+          $p = Start-Process -FilePath "dist\TrackShot\TrackShot.exe" -ArgumentList "--self-test" -Wait -PassThru -NoNewWindow
+          if (Test-Path selftest.txt) { Get-Content selftest.txt } else { Write-Output "no self-test report written" }
+          if ($p.ExitCode -ne 0) { Write-Error "self-test exit code $($p.ExitCode)"; exit 1 }
+
+      - name: Package
+        id: package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          name="TrackShot-${VERSION}-${{ matrix.target }}"
+          case "$RUNNER_OS" in
+            macOS)   file="$name.zip";    ditto -c -k --keepParent dist/TrackShot.app "$file" ;;
+            Linux)   file="$name.tar.gz"; tar -C dist -czf "$file" TrackShot ;;
+            Windows) file="$name.zip";    (cd dist && 7z a -tzip -bso0 "../$file" TrackShot) ;;
+          esac
+          ls -l "$file"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trackshot-${{ matrix.target }}
+          path: ${{ steps.package.outputs.file }}
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Tag matches the version
+        run: |
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match pyproject version ${version}" >&2
+            exit 1
+          fi
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l release
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --title "TrackShot ${VERSION}" \
+            --notes-file .github/release-notes.md

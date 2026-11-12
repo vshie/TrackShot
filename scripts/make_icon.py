@@ -1,4 +1,4 @@
-"""Draws TrackShot's app icon and writes the PNG the app uses plus the macOS .icns.
+"""Draws TrackShot's app icon and writes the PNG the app uses, the Windows .ico and the macOS .icns.
 
 The icon is a camera lens on a deep-water tile with a survey track sweeping around it: the app
 is "the camera's eye, turned into a track". It is drawn in code so it can be regenerated and
@@ -24,6 +24,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 ROOT = Path(__file__).resolve().parents[1]
 PNG_PATH = ROOT / "src" / "trackshot" / "resources" / "icon.png"
 ICNS_PATH = ROOT / "packaging" / "TrackShot.icns"
+ICO_PATH = ROOT / "packaging" / "TrackShot.ico"   # Windows exe icon
 
 SIZE = 1024
 SS = 3                      # supersampling: draw at 3x, then downscale for smooth edges
@@ -197,8 +198,11 @@ def write_icns(png: Path, icns: Path) -> None:
 
 def main() -> int:
     PNG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    draw_icon().save(PNG_PATH)
+    icon = draw_icon()
+    icon.save(PNG_PATH)
     print(f"wrote {PNG_PATH}")
+    icon.save(ICO_PATH, sizes=[(n, n) for n in (16, 24, 32, 48, 64, 128, 256)])
+    print(f"wrote {ICO_PATH}")
     if sys.platform == "darwin" and shutil.which("iconutil") and shutil.which("sips"):
         write_icns(PNG_PATH, ICNS_PATH)
         print(f"wrote {ICNS_PATH}")
