@@ -103,6 +103,12 @@ def self_test() -> int:
 
     With TRACKSHOT_SELFTEST_LOG set, the report is also written to that file: a windowed Windows
     exe has no stdout to print to."""
+    for stream in (sys.stdout, sys.stderr):
+        # A Windows console is cp1252, which has no "→": replace what it can't show, don't crash
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):   # None, or not a reconfigurable stream
+            pass
     log_file = os.environ.get("TRACKSHOT_SELFTEST_LOG")
     if log_file:
         sys.stdout = _Tee(sys.stdout, open(log_file, "w", encoding="utf-8"))

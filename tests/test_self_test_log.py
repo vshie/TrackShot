@@ -59,3 +59,17 @@ def test_real_self_test_runs_without_stdout_or_stderr(tmp_path, monkeypatch):
     report = log.read_text(encoding="utf-8")
     assert code == 0, report
     assert "self-test passed" in report
+
+
+def test_a_console_that_cannot_encode_the_report_does_not_crash(tmp_path, monkeypatch):
+    """A Windows console is cp1252; the report contains '→'."""
+    import io
+    raw = io.BytesIO()
+    console = io.TextIOWrapper(raw, encoding="cp1252")
+    monkeypatch.delenv("TRACKSHOT_SELFTEST_LOG", raising=False)
+    monkeypatch.setattr(sys, "stdout", console)
+    monkeypatch.setattr(entry, "_self_test", lambda: print("ok    simulator → odometry → MAVLink") or 0)
+
+    assert entry.self_test() == 0
+    console.flush()
+    assert raw.getvalue() == "ok    simulator ? odometry ? MAVLink\n".encode("cp1252")
