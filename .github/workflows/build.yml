@@ -22,6 +22,7 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -92,10 +93,12 @@ jobs:
 
       - name: Bundle self-test (Linux)
         if: runner.os == 'Linux'
+        timeout-minutes: 5
         run: dist/TrackShot/TrackShot --self-test
 
       - name: Bundle self-test (Windows)
         if: runner.os == 'Windows'
+        timeout-minutes: 5     # an unhandled error in a windowed exe opens a dialog nobody can close
         shell: pwsh
         # A windowed exe has no stdout: the report goes to a file instead
         run: |

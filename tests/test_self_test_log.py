@@ -43,3 +43,19 @@ def test_without_the_variable_nothing_is_redirected(monkeypatch, capsys):
 
     assert entry.self_test() == 0
     assert "self-test passed" in capsys.readouterr().out
+
+
+def test_real_self_test_runs_without_stdout_or_stderr(tmp_path, monkeypatch):
+    """The windowed Windows exe: no stdout and no stderr. The self-test must still run and pass
+    (it once called logger.add(sys.stderr), which raises for None, and the bootloader's error
+    dialog then hung CI)."""
+    log = tmp_path / "selftest.txt"
+    monkeypatch.setenv("TRACKSHOT_SELFTEST_LOG", str(log))
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+
+    code = entry.self_test()
+
+    report = log.read_text(encoding="utf-8")
+    assert code == 0, report
+    assert "self-test passed" in report

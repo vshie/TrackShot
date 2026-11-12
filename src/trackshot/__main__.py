@@ -138,7 +138,8 @@ class _Tee:
 def _self_test() -> int:
     ok = True
     logger.remove()   # just the results on stdout; warnings and errors still reach stderr
-    logger.add(sys.stderr, level="WARNING")
+    if sys.stderr is not None:   # a windowed Windows exe has no stderr (loguru rejects None)
+        logger.add(sys.stderr, level="WARNING")
 
     def check(label: str, fn) -> None:
         nonlocal ok
@@ -343,8 +344,9 @@ def main(argv: list[str] | None = None) -> int:
         if not pool_done:
             logger.warning("Leaving with a background task still running")
         logger.complete()
-        sys.stdout.flush()
-        sys.stderr.flush()
+        for stream in (sys.stdout, sys.stderr):
+            if stream is not None:   # None in a windowed Windows exe
+                stream.flush()
         os._exit(code)
     return code
 

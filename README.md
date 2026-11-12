@@ -273,9 +273,11 @@ capture runs at most at the VIO frame rate, because its pairs come from the VIO 
   yet with a real camera or vehicle. Field testing so far has been on macOS. depthai's Windows
   wheel has RTAB-Map but **no Basalt**; TrackShot asks depthai which backends exist instead of
   assuming them.
-- **On Windows, use the mavlink2rest transport (the default).** pymavlink's `udpout` binds the
-  local UDP port equal to the destination port (e.g. 14550) on Windows, so the UDP transport
-  clashes with a ground station on the same PC that uses that port.
+- **Windows, UDP transport only:** with the default mavlink2rest transport there is no UDP socket
+  and nothing to clash with (Cockpit also uses BlueOS's WebSocket). If you switch TrackShot to UDP
+  on Windows, pymavlink binds the local port equal to the destination port (e.g. 14550), which
+  clashes with a ground station on the same PC listening there (QGroundControl, Mission Planner).
+  Point TrackShot at a different BlueOS UDP endpoint port (e.g. 14551) in that case.
 - **The app is unsigned** (ad-hoc signed). On another Mac, Gatekeeper blocks it: right-click
   the app and choose Open, then confirm. On first connect, macOS asks for **Local Network** access;
   allow it, or TrackShot can't reach the camera or the vehicle.
