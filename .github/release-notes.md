@@ -2,6 +2,23 @@ TrackShot runs visual-inertial odometry (RTAB-Map or Basalt) on the topside comp
 OAK-D over the tether, and sends `VISION_POSITION_DELTA` to ArduSub via BlueOS, so position modes and
 AUTO missions work without GPS. It can also record survey images tagged with position and attitude.
 
+## New in 0.1.1: lost-tracking handling
+
+- **No more frozen poses to the autopilot.** When RTAB-Map loses tracking it keeps reporting its
+  last pose; 0.1.0 sent that as "not moving" at full confidence. Now an exactly repeated pose is
+  never sent, and after 1 s of them TrackShot shows **Lost** and sends nothing until the VIO tracks
+  again.
+- **Safe start-up.** Nothing is sent until the VIO has tracked steadily (shown as **Acquiring**),
+  so starting VIO before the camera sees the seabed is fine.
+- **Automatic recovery.** RTAB-Map resets itself to its latest pose after 3 s lost, and retries
+  every 3 s.
+- **Restart VIO button** (⌘⇧R) reconnects the camera and restarts the VIO. One restart at a time,
+  then a 20 s cooldown.
+- **Cockpit:** `TS_TRACK` is 1 good, 0.5 degraded, 0.25 acquiring, 0 lost. Below 0.5, TrackShot is
+  not sending.
+- **Windows fixes:** the windowed exe no longer crashes on its missing stderr, and the self-test
+  no longer crashes on a cp1252 console.
+
 ## Downloads
 
 | Platform | File | Notes |
