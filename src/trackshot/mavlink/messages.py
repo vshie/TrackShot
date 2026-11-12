@@ -10,12 +10,13 @@ from functools import lru_cache
 
 from pymavlink.dialects.v20 import ardupilotmega
 
+from trackshot.core.ned import NedEstimate
 from trackshot.core.odometry import DeltaMessage, OdometryHealth
 
 NAMED_VALUE_NAME_MAX = 10   # NAMED_VALUE_FLOAT.name is char[10]
 
 # Cockpit shows these as NAMED_VALUE_FLOAT; tracking as a number so it can be graphed/alerted on.
-# Below 0.5, TrackShot is not sending VISION_POSITION_DELTA (acquiring, lost or not started).
+# Below 0.5, TrackShot is not sending odometry (acquiring, lost or not started).
 TRACKING_VALUES = {"good": 1.0, "degraded": 0.5, "acquiring": 0.25, "lost": 0.0, "unknown": 0.0}
 
 
@@ -26,6 +27,34 @@ def vision_position_delta(d: DeltaMessage) -> tuple[str, dict]:
         "angle_delta": [float(v) for v in d.angle_delta],
         "position_delta": [float(v) for v in d.position_delta],
         "confidence": float(d.confidence),
+    }
+
+
+def vision_position_estimate(e: NedEstimate) -> tuple[str, dict]:
+    """Horizontal position in the EKF's NED frame (see trackshot.core.ned). Zero covariance makes
+    ArduSub use VISO_POS_M_NSE; MAVLink's NaN "unknown" can't travel in mavlink2rest's JSON."""
+    return "VISION_POSITION_ESTIMATE", {
+        "usec": int(e.usec),
+        "x": float(e.position[0]),
+        "y": float(e.position[1]),
+        "z": float(e.position[2]),
+        "roll": 0.0,
+        "pitch": 0.0,
+        "yaw": float(e.yaw),
+        "covariance": [0.0] * 21,
+        "reset_counter": 0,
+    }
+
+
+def vision_speed_estimate(e: NedEstimate) -> tuple[str, dict]:
+    """NED velocity; down is 0 and unused (EK3_SRC1_VELZ 0). ArduSub uses VISO_VEL_M_NSE."""
+    return "VISION_SPEED_ESTIMATE", {
+        "usec": int(e.usec),
+        "x": float(e.velocity[0]),
+        "y": float(e.velocity[1]),
+        "z": float(e.velocity[2]),
+        "covariance": [0.0] * 9,
+        "reset_counter": 0,
     }
 
 

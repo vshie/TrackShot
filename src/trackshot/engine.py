@@ -35,6 +35,8 @@ from trackshot.autopilot.params import AutopilotParams
 from trackshot.autopilot.telemetry import VehicleTelemetry
 from trackshot.capture.writer import CaptureWriter
 from trackshot.config import Settings
+from trackshot.core.ned import NedTracker
+from trackshot.runlog import RunLog
 from trackshot.core.odometry import OdometryProcessor, apply_camera_rotation, create_camera_rotation_matrix
 from trackshot.mavlink import messages
 from trackshot.mavlink.base import Transport
@@ -142,6 +144,11 @@ class _Run:
         self.settings = settings
         self.active = True
         self.processor = OdometryProcessor(camera_angle_deg=settings.camera_angle_deg)
+        self.ned = NedTracker()                  # for odometry_output "position_speed"
+        self.waiting_for_heading_logged = False
+        self.output_logged = False
+        self.last_nav: Optional[tuple[float, float, float]] = None   # north, east, heading (rad) for the map
+        self.runlog: Optional[RunLog] = None
         self.rotation = (create_camera_rotation_matrix(settings.camera_angle_deg)
                          if settings.camera_angle_deg else None)
         self.source: Optional[PoseSource] = None
@@ -392,6 +399,10 @@ class Engine(QObject):
                 run.transport.start()
             run.telemetry = VehicleTelemetry(settings.mavlink2rest_http_url(), TELEMETRY_POLL_HZ)
             run.telemetry.start()
+            try:
+                run.runlog = RunLog()
+            except Exception as e:  # noqa: BLE001 - the data log must never stop a run
+                logger.warning(f"No run log: {e}")
             run.source = self._source_factory(settings, callbacks)
             run.source.start()
         except Exception as e:  # noqa: BLE001 - any failure to start must reach the UI
@@ -456,6 +467,8 @@ class Engine(QObject):
                 step()
             except Exception:  # noqa: BLE001 - one part failing must not leave the others running
                 logger.exception(f"Stopping the {name} failed")
+        if run.runlog is not None:
+            run.runlog.close()
         self._emit_safely(self._teardownDone)
 
     def _teardown_busy(self) -> bool:
@@ -494,15 +507,71 @@ class Engine(QObject):
         if not run.active:
             return
         delta = run.processor.process(sample)
-        if delta is not None and run.transport is not None:
-            run.transport.send(*messages.vision_position_delta(delta))
+        telemetry = run.telemetry.latest() if run.telemetry is not None else {}
+        estimate = self._ned_estimate(run, delta, telemetry) if delta is not None else None
+        sent = self._send_odometry(run, delta, estimate) if delta is not None and run.transport is not None else ""
+        if estimate is not None:
+            run.last_nav = (estimate.position[0], estimate.position[1], estimate.yaw)
         position, quaternion = apply_camera_rotation(sample.position, sample.quaternion, run.rotation)
         pose = (*position, *quaternion)
+        self._log_row(run, sample, pose, delta, estimate, sent, telemetry)
         if not all(math.isfinite(v) for v in pose):
             return
         run.last_pose, run.last_tracking = pose, sample.tracking
         if run.pose_throttle.ready(time.monotonic()):
-            self._poses.put("pose", (sample, pose))
+            self._poses.put("pose", (sample, pose, run.last_nav))
+
+    @staticmethod
+    def _ned_estimate(run: _Run, delta, telemetry: dict):
+        """The delta rotated into north/east by the autopilot's attitude (trackshot.core.ned), or
+        None without telemetry. Computed in both output modes: the map shows this track."""
+        roll, pitch = telemetry.get("roll_deg"), telemetry.get("pitch_deg")
+        run.ned.observe_attitude(None if roll is None else math.radians(roll),
+                                 None if pitch is None else math.radians(pitch),
+                                 telemetry.get("yaw_rad"), telemetry.get("yaw_time"))
+        local = telemetry.get("local_ne")
+        local_time = telemetry.get("local_ne_time")
+        fresh_local = local if local is not None and local_time is not None and time.time() - local_time < 2.0 else None
+        return run.ned.update(delta, fresh_local)
+
+    def _send_odometry(self, run: _Run, delta, estimate) -> str:
+        """Source thread. The delta as the configured output; returns what was sent ("" if nothing)."""
+        if run.settings.odometry_output == "position_delta":
+            run.transport.send(*messages.vision_position_delta(delta))
+            return "delta"
+        if estimate is None:
+            if not run.waiting_for_heading_logged:
+                run.waiting_for_heading_logged = True
+                logger.warning("Waiting for the vehicle's attitude (ATTITUDE via mavlink2rest) before sending: "
+                               "the horizontal-only output is rotated into north/east by the compass heading")
+            return ""
+        if not run.output_logged:
+            run.output_logged = True
+            logger.info(f"Sending VISION_POSITION_ESTIMATE + VISION_SPEED_ESTIMATE (horizontal only), "
+                        f"rotated by the compass heading ({math.degrees(estimate.yaw) % 360:.0f}° now)")
+        run.waiting_for_heading_logged = False
+        run.transport.send(*messages.vision_position_estimate(estimate))
+        run.transport.send(*messages.vision_speed_estimate(estimate))
+        return "estimate"
+
+    @staticmethod
+    def _log_row(run: _Run, sample: PoseSample, pose: tuple, delta, estimate, sent: str, telemetry: dict) -> None:
+        if run.runlog is None:
+            return
+        processor = run.processor
+        row = dict(t_wall=sample.t_received, t_capture_us=sample.t_capture_us, sent=sent,
+                   tracking=processor.tracking_state(), sending=processor.is_sending(),
+                   ap_heading_deg=telemetry.get("heading_deg"), ap_roll_deg=telemetry.get("roll_deg"),
+                   ap_pitch_deg=telemetry.get("pitch_deg"), ap_depth_m=telemetry.get("depth_m"))
+        row.update(zip(("cam_x", "cam_y", "cam_z", "cam_qw", "cam_qx", "cam_qy", "cam_qz"),
+                       (*sample.position, *sample.quaternion)))
+        row.update(zip(("veh_x", "veh_y", "veh_z", "veh_qw", "veh_qx", "veh_qy", "veh_qz"), pose))
+        if delta is not None:
+            row.update(zip(("d_fwd", "d_right", "d_down"), delta.position_delta), d_span_us=delta.time_delta_usec)
+        if estimate is not None:
+            row.update(ned_n=estimate.position[0], ned_e=estimate.position[1], ned_vn=estimate.velocity[0],
+                       ned_ve=estimate.velocity[1], ned_heading_deg=math.degrees(estimate.yaw) % 360)
+        run.runlog.row(**row)
 
     def _on_preview(self, run: _Run, frame: PreviewFrame) -> None:
         if not run.active:

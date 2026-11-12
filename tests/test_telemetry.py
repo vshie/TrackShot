@@ -1,5 +1,6 @@
 """read_autopilot_telemetry and the VehicleTelemetry poller against the fake mavlink2rest."""
 
+import math
 import socket
 import time
 
@@ -27,8 +28,7 @@ def free_port() -> int:
 def test_read_autopilot_telemetry(fake):
     t = read_autopilot_telemetry(fake.http_base)
     v = fake.vehicle
-    assert list(t) == ["lat", "lon", "heading_deg", "roll_deg", "pitch_deg", "depth_m",
-                       "temperature_c", "altitude_m", "mission_seq"]
+    assert list(t) == list(TELEMETRY_KEYS)
     assert t["lat"] == pytest.approx(v.lat) and t["lon"] == pytest.approx(v.lon)
     assert t["heading_deg"] == pytest.approx(v.heading_deg)
     assert t["roll_deg"] == pytest.approx(v.roll_deg) and t["pitch_deg"] == pytest.approx(v.pitch_deg)
@@ -36,6 +36,11 @@ def test_read_autopilot_telemetry(fake):
     assert t["temperature_c"] == pytest.approx(v.temperature_c)
     assert t["altitude_m"] == pytest.approx(v.altitude_m)
     assert t["mission_seq"] == 0
+    # The EKF heading and local position, each stamped with when it was valid (for core.ned)
+    assert math.degrees(t["yaw_rad"]) % 360 == pytest.approx(v.heading_deg)
+    assert abs(t["yaw_time"] - time.time()) < 2.0
+    assert t["local_ne"] == pytest.approx(v.local_ne)
+    assert abs(t["local_ne_time"] - time.time()) < 2.0
 
 
 def test_no_origin_and_no_rangefinder():

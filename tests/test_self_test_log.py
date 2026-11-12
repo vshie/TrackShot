@@ -73,3 +73,24 @@ def test_a_console_that_cannot_encode_the_report_does_not_crash(tmp_path, monkey
     assert entry.self_test() == 0
     console.flush()
     assert raw.getvalue() == "ok    simulator ? odometry ? MAVLink\n".encode("cp1252")
+
+
+def test_tests_cannot_reach_the_vehicle_network():
+    import socket
+    import pytest as _pytest
+    with _pytest.raises(ConnectionRefusedError):
+        socket.create_connection(("192.168.2.2", 80), timeout=0.2)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        with _pytest.raises(ConnectionRefusedError):
+            s.sendto(b"x", ("192.168.2.118", 11491))
+    finally:
+        s.close()
+
+
+def test_tests_cannot_open_a_real_camera():
+    import depthai as dai
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="never connect to a real camera"):
+        dai.Device(dai.DeviceInfo("192.168.2.118"))
+    assert dai.Device.getAllConnectedDevices() == []

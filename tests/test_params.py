@@ -549,3 +549,24 @@ def test_hidden_viso_params_round_trip():
         assert param_sets(fake)[-1] == ("VISO_TYPE", 0.0)
         fake.reboot()
         assert autopilot.read("VISO_DELAY_MS") is None
+
+
+def test_a_vertical_velocity_source_is_flagged_and_cleared(fake):
+    """EK3_SRC1_VELZ must be 0: the depth sensor alone sets the vertical (see trackshot.core.ned)."""
+    fake.params["EK3_SRC1_VELZ"] = 6.0          # ExtNav: the camera's vertical velocity would be fused
+    autopilot = AutopilotParams(fake.http_base, timeout=1.0)
+    rows = {r["name"]: r for r in autopilot.check()}
+    assert not rows["EK3_SRC1_VELZ"]["ok"] and rows["EK3_SRC1_VELZ"]["recommended"] == 0
+    autopilot.apply(list(rows.values()))
+    assert fake.params["EK3_SRC1_VELZ"] == 0.0
+
+
+def test_an_autopilot_side_camera_rotation_is_flagged_and_cleared(fake):
+    """TrackShot applies the camera's mounting angle itself; VISO_ORIENT 25 (pitch 270) on top
+    would rotate the motion a second time."""
+    fake.params["VISO_ORIENT"] = 25.0
+    autopilot = AutopilotParams(fake.http_base, timeout=1.0)
+    rows = {r["name"]: r for r in autopilot.check()}
+    assert not rows["VISO_ORIENT"]["ok"] and rows["VISO_ORIENT"]["recommended"] == 0
+    autopilot.apply(list(rows.values()))
+    assert fake.params["VISO_ORIENT"] == 0.0

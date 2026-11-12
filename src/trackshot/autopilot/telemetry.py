@@ -38,10 +38,12 @@ MAV_MODE_FLAG_SAFETY_ARMED = 128
 
 # Messages read_autopilot_telemetry() needs, fetched in parallel
 TELEMETRY_MESSAGES = ("GLOBAL_POSITION_INT", "ATTITUDE", "VFR_HUD",
-                      "SCALED_PRESSURE2", "DISTANCE_SENSOR", "MISSION_CURRENT")
+                      "SCALED_PRESSURE2", "DISTANCE_SENSOR", "MISSION_CURRENT", "LOCAL_POSITION_NED")
 
 TELEMETRY_KEYS = ("lat", "lon", "heading_deg", "roll_deg", "pitch_deg",
-                  "depth_m", "temperature_c", "altitude_m", "mission_seq")
+                  "depth_m", "temperature_c", "altitude_m", "mission_seq",
+                  # EKF heading and local position with the wall time each was valid at
+                  "yaw_rad", "yaw_time", "local_ne", "local_ne_time")
 
 try:
     from pymavlink.mavutil import mode_mapping_sub as _ARDUSUB_MODES
@@ -159,6 +161,7 @@ def telemetry_from_messages(raw: dict[str, Optional[dict]], clock_skew_s: float 
     press = fresh(raw.get("SCALED_PRESSURE2"), clock_skew_s)
     dist = fresh(raw.get("DISTANCE_SENSOR"), clock_skew_s)
     mission = fresh(raw.get("MISSION_CURRENT"), clock_skew_s)
+    local = fresh(raw.get("LOCAL_POSITION_NED"), clock_skew_s)
 
     t: dict[str, Any] = {key: None for key in TELEMETRY_KEYS}
     if pos:
@@ -183,6 +186,17 @@ def telemetry_from_messages(raw: dict[str, Optional[dict]], clock_skew_s: float 
         t["altitude_m"] = dist["current_distance"] / 100.0
     if mission:
         t["mission_seq"] = mission.get("seq")
+    # For the horizontal-only VIO output (trackshot.core.ned): the EKF's heading and local position,
+    # each with the host wall time it was valid at (None when that can't be told)
+    now = time.time()
+    if att and math.isfinite(att.get("yaw", math.nan)):
+        age = message_age_s(raw.get("ATTITUDE"), clock_skew_s)
+        if age is not None:
+            t["yaw_rad"], t["yaw_time"] = float(att["yaw"]), now - max(0.0, age)
+    if local:
+        age = message_age_s(raw.get("LOCAL_POSITION_NED"), clock_skew_s)
+        t["local_ne"] = (float(local["x"]), float(local["y"]))
+        t["local_ne_time"] = None if age is None else now - max(0.0, age)
     return t
 
 

@@ -118,7 +118,7 @@ def body_speed(msg: dict) -> float:
 
 @pytest.mark.parametrize("transport", ["mavlink2rest", "udp"])
 def test_sim_to_fake_autopilot_end_to_end(qtbot, fake, make_settings, make_engine, transport):
-    engine = make_engine(make_settings(transport=transport), sim_factory(FAULT_SCRIPT))
+    engine = make_engine(make_settings(transport=transport, odometry_output="position_delta"), sim_factory(FAULT_SCRIPT))
     rec = Recorder(engine)
     engine.start()
     qtbot.waitUntil(lambda: engine.state == STATE_RUNNING, timeout=5000)
@@ -189,7 +189,7 @@ def test_pose_and_preview_signals_are_throttled(qtbot, make_settings, make_engin
 
     assert len(rec.poses) > 10 and max_rate(rec.poses) <= 21
     assert rec.previews and max_rate(rec.previews) <= 11
-    sample, pose = rec.poses[-1][1]
+    sample, pose, nav = rec.poses[-1][1]
     assert len(pose) == 7 and sample.position[0] > 0
     assert rec.threads == {MAIN_THREAD}
 
@@ -468,7 +468,7 @@ def test_simulator_feeds_a_remote_autopilot_only_if_it_is_sitl(qtbot, fake, make
         fake.params[engine_module.SITL_MARKER_PARAM] = 1.0
     else:
         fake.params.pop(engine_module.SITL_MARKER_PARAM, None)
-    engine = make_engine(make_settings())
+    engine = make_engine(make_settings(odometry_output="position_delta"))
     rec = Recorder(engine)
     engine.start()
     if is_sitl:
@@ -516,7 +516,7 @@ FREEZE_AT_S, FREEZE_S = 2.0, 3.0
 def test_a_frozen_vio_stops_the_deltas_until_it_recovers(qtbot, fake, make_settings, make_engine):
     """The field failure: RTAB-Map lost, reporting its last pose over and over. Before, that went out
     as zero deltas at confidence 100; now nothing goes out until the VIO tracks again."""
-    engine = make_engine(make_settings(), sim_factory([{"at_s": FREEZE_AT_S, "event": "freeze",
+    engine = make_engine(make_settings(odometry_output="position_delta"), sim_factory([{"at_s": FREEZE_AT_S, "event": "freeze",
                                                          "duration_s": FREEZE_S}]))
     rec = Recorder(engine)
     engine.start()
@@ -568,3 +568,55 @@ def test_restart_vio_reconnects_once_and_then_cools_down(qtbot, make_settings, m
     # After the cooldown it is available again
     monkeypatch.setattr(engine_module, "RESTART_VIO_COOLDOWN_S", 0.0)
     assert engine.restart_vio_blocked() is None
+
+
+# --- Horizontal-only output (VISION_POSITION_ESTIMATE + VISION_SPEED_ESTIMATE) ---------------------
+
+def test_horizontal_only_output_never_carries_vertical_motion(qtbot, fake, make_settings, make_engine):
+    """The default output. The simulator flies forward at 0.3 m/s with the depth rising, so the VIO
+    sees vertical motion; none of it may reach the autopilot, and the horizontal motion must come out
+    in the autopilot's north/east frame (the fake heads 87.5°), anchored on the EKF's position."""
+    engine = make_engine(make_settings())
+    assert engine.settings.odometry_output == "position_speed"
+    rec = Recorder(engine)
+    engine.start()
+    qtbot.waitUntil(lambda: engine.state == STATE_RUNNING, timeout=5000)
+    qtbot.waitUntil(lambda: len(fake.received("VISION_SPEED_ESTIMATE")) >= 40, timeout=10000)
+    engine.stop()
+    assert engine.wait_idle(8.0)
+
+    assert fake.received("VISION_POSITION_DELTA") == []
+    speeds = fake.received("VISION_SPEED_ESTIMATE")
+    positions = fake.received("VISION_POSITION_ESTIMATE")
+    assert len(positions) == len(speeds)
+    assert all(m["z"] == 0.0 for m in speeds), "vertical velocity reached the autopilot"
+    assert all(m["z"] == 0.0 for m in positions)
+    # Forward at 0.3 m/s along the fake's 87.5° heading: almost all east, a little north
+    heading = math.radians(fake.vehicle.heading_deg)
+    vn = statistics.median(m["x"] for m in speeds)
+    ve = statistics.median(m["y"] for m in speeds)
+    assert math.hypot(vn, ve) == pytest.approx(SPEED_MPS, rel=0.15)
+    assert math.atan2(ve, vn) == pytest.approx(heading, abs=math.radians(3))
+    # Anchored on the EKF's local position, then moving along the heading
+    first, last = positions[0], positions[-1]
+    assert (first["x"], first["y"]) == pytest.approx(fake.vehicle.local_ne, abs=0.05)
+    moved = math.atan2(last["y"] - first["y"], last["x"] - first["x"])
+    assert moved == pytest.approx(heading, abs=math.radians(3))
+    assert all(m["_header"] == {"system_id": 1, "component_id": 197} for m in speeds)
+    assert any("horizontal only" in t for _, t in rec.logs)
+
+
+def test_a_run_writes_its_data_log(qtbot, fake, make_settings, make_engine, isolated_run_logs):
+    import csv
+    engine = make_engine(make_settings())
+    engine.start()
+    qtbot.waitUntil(lambda: len(fake.received("VISION_SPEED_ESTIMATE")) >= 10, timeout=10000)
+    engine.stop()
+    assert engine.wait_idle(8.0)
+    files = list(isolated_run_logs.glob("run_*.csv"))
+    assert len(files) == 1
+    rows = list(csv.DictReader(open(files[0])))
+    assert len(rows) > 20
+    sent = [r for r in rows if r["sent"] == "estimate"]
+    assert sent and all(r["ned_n"] and r["d_fwd"] and r["ap_heading_deg"] for r in sent)
+    assert {r["tracking"] for r in rows} >= {"acquiring", "tracking"}

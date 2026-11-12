@@ -4,8 +4,10 @@ Poses arrive at up to 20 Hz from the engine; they go into fixed-size numpy buffe
 redraw on a 10 Hz timer, so a long dive never slows the GUI. The oldest points are dropped beyond
 MAX_POINTS — the panel says so.
 
-Axes are the VIO world frame (FLU: x forward at start, y left), drawn with x to the right and y up,
-which is the right-handed top-down view; heading is yaw about z, counter-clockwise from +x.
+Once the autopilot's attitude is known, the map is north-up: east to the right, north up, the
+track being the VIO's motion rotated by the compass (trackshot.core.ned), and the red arrow is the
+vehicle's compass heading. Before that (no telemetry, e.g. the simulator on its own) it falls back
+to the VIO's own frame (x forward at start, y left) and the VIO's yaw.
 """
 
 from __future__ import annotations
@@ -64,7 +66,8 @@ class TrajectoryPanel(QWidget):
         self._path = RingBuffer(MAX_POINTS, 4)       # t, x, y, z
         self._depth = RingBuffer(MAX_POINTS, 2)      # t, -depth (so it reads the same way as z-up)
         self._t0: Optional[float] = None
-        self._heading: Optional[float] = None
+        self._heading: Optional[float] = None       # VIO frame: CCW from +x. North-up: clockwise from north
+        self._north_up = False
         self._dirty = False
 
         self.plot = pg.PlotWidget()
@@ -130,16 +133,31 @@ class TrajectoryPanel(QWidget):
 
     # --- Inputs -------------------------------------------------------------------------------
     def add_pose(self, payload) -> None:
-        """poseUpdated payload: (PoseSample, (x, y, z, qw, qx, qy, qz) after camera rotation)."""
-        sample, pose = payload
+        """poseUpdated payload: (PoseSample, vehicle pose (x, y, z, qw, qx, qy, qz), nav), nav being
+        (north, east, compass heading rad) once the autopilot's attitude is known, else None."""
+        sample, pose = payload[0], payload[1]
+        nav = payload[2] if len(payload) > 2 else None
         if pose is None:
             return
         x, y, z, qw, qx, qy, qz = pose[:7]
         t = getattr(sample, "t_received", None) or time.time()
+        if nav is not None and not self._north_up:
+            # Switch to the north-up map: the VIO-frame points don't belong on it
+            self._path.clear()
+            self._north_up = True
+            self.plot.setLabel("bottom", "east", units="m")
+            self.plot.setLabel("left", "north", units="m")
         if self._t0 is None:
             self._t0 = t
-        self._path.append((t - self._t0, x, y, z))
-        self._heading = yaw_from_quaternion(qw, qx, qy, qz)
+        if self._north_up:
+            if nav is None:
+                return
+            north, east, heading = nav
+            self._path.append((t - self._t0, east, north, z))
+            self._heading = heading
+        else:
+            self._path.append((t - self._t0, x, y, z))
+            self._heading = yaw_from_quaternion(qw, qx, qy, qz)
         self._dirty = True
 
     def add_vehicle_depth(self, depth_m: Optional[float], t: Optional[float] = None) -> None:
@@ -156,6 +174,9 @@ class TrajectoryPanel(QWidget):
         self._depth.clear()
         self._t0 = None
         self._heading = None
+        self._north_up = False
+        self.plot.setLabel("bottom", "x (forward at start)", units="m")
+        self.plot.setLabel("left", "y (left at start)", units="m")
         self._dirty = True
         self.refresh()
 
@@ -191,8 +212,12 @@ class TrajectoryPanel(QWidget):
             self.start_marker.setData([path[0, 1]], [path[0, 2]])
             x, y = path[-1, 1], path[-1, 2]
             self.arrow.setPos(x, y)
-            # ArrowItem's angle 0 points to -x on screen and turns clockwise (screen y is down)
-            self.arrow.setStyle(angle=180.0 - math.degrees(self._heading or 0.0))
+            # ArrowItem's angle 0 points to -x on screen and turns clockwise (screen y is down).
+            # North-up: a compass heading ψ points (east, north) = (sin ψ, cos ψ), i.e. 90° − ψ
+            # counter-clockwise from +x on screen.
+            heading = math.degrees(self._heading or 0.0)
+            ccw_from_x = 90.0 - heading if self._north_up else heading
+            self.arrow.setStyle(angle=180.0 - ccw_from_x)
             self.arrow.setVisible(True)
             if self.follow.isChecked():
                 self._centre_on(x, y)
@@ -218,4 +243,9 @@ class TrajectoryPanel(QWidget):
             return
         x, y, z = path[-1, 1:4]
         heading = math.degrees(self._heading or 0.0)
-        self.info.setText(f"x {x:+.2f}  y {y:+.2f}  z {z:+.2f} m  ·  yaw {heading:+.0f}°  ·  {len(path):,} pts")
+        if self._north_up:
+            self.info.setText(f"N {y:+.2f}  E {x:+.2f} m  ·  heading {heading % 360:.0f}° (compass)  ·  "
+                              f"{len(path):,} pts")
+        else:
+            self.info.setText(f"x {x:+.2f}  y {y:+.2f}  z {z:+.2f} m  ·  yaw {heading:+.0f}° (VIO)  ·  "
+                              f"{len(path):,} pts")

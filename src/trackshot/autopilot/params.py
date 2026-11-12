@@ -44,6 +44,15 @@ VISUAL_ODOMETRY_PARAMS = [
     ("EK3_SRC1_POSXY", 6, False),  # ExternalNav
     ("EK3_SRC1_VELXY", 6, False),  # ExternalNav
     ("EK3_SRC1_POSZ", 1, False),   # Baro
+    # No vertical velocity source: the depth sensor alone sets the vertical. TrackShot's default
+    # output (VISION_SPEED_ESTIMATE) is then fused horizontally only; see trackshot.core.ned.
+    ("EK3_SRC1_VELZ", 0, False),
+    # TrackShot sends motion already in the vehicle's frame (the camera's mounting angle is
+    # applied in the app), so the autopilot must not rotate it again
+    ("VISO_ORIENT", 0, False),
+    # Not checked: VISO_QUAL_MIN must stay at its default 0, since VISION_POSITION/SPEED_ESTIMATE
+    # carry no quality (ArduSub reads 0). VISO_* parameters only exist after VISO_TYPE is set and
+    # the autopilot rebooted, so they can't be written in the same apply.
     # Bit 0 ("fuse all velocities") would blend GPS velocity in with the VIO's. GPS stays enabled
     # so a surface fix still sets the EKF origin.
     ("EK3_SRC_OPTIONS", 0, False),

@@ -103,6 +103,14 @@ every delta whatever its confidence, so a wrong "not moving" is worse than nothi
 - **The log:** "lost" and "regained" messages come in pairs, with at most one "lost" message
   every 10 s. Losses in between are counted into the next message.
 
+### Logs
+
+- `~/Library/Logs/TrackShot/trackshot.log`: everything in the Log panel (rotating, 5 MB × 3).
+- `~/Library/Logs/TrackShot/runs/run_<date>_<time>.csv`: one row per VIO pose for each run (Start →
+  Stop), the last 50 runs. Each row holds the camera's raw pose, the vehicle-frame pose, the
+  tracking state, the delta and/or north/east estimate sent to the autopilot, and the
+  autopilot's heading, roll, pitch and depth at the time.
+
 `TS_TRACK` values for Cockpit:
 
 | Value | Meaning |
@@ -327,8 +335,12 @@ capture runs at most at the VIO frame rate, because its pairs come from the VIO 
     is left idle (using a CPU core) until you quit TrackShot.
   - Basalt's poses are timed by the newest image it has received, so its latency reads low when
     it falls behind the camera.
-- `camera_angle_deg` rotates the reported trajectory but cancels out of the body-frame deltas, as
-  it does in the extension. Compensating a pitched camera properly needs a design change.
+- **Camera mounting:** Settings → VIO → Camera angle. Use 0 for a forward-looking camera, and 90
+  for one looking straight down with the top of the image towards the bow. TrackShot turns the
+  camera's motion into the vehicle's frame (forward, right, down) with it, so `VISO_ORIENT` must be
+  0 on the autopilot; the parameter check enforces that. Up to 0.1.1 the angle only rotated the
+  on-screen track, as in the BlueOS extension, so a down-looking camera sent its forward motion as
+  vertical unless `VISO_ORIENT` rotated it back.
 - **The camera can't be booted over a slow, high-latency link** (e.g. a remote camera through
   Tailscale and Starlink). On connect, depthai uploads 40 MB of device firmware in 5 MiB pieces,
   and its network bootloader drops the connection when a keepalive waits more than 6 s. That

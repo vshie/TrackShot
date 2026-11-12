@@ -69,6 +69,10 @@ class DeltaMessage:
     position_delta: Vec3                         # FRD body, m
     angle_delta: Vec3                            # FRD body rotation vector prev→current, rad
     confidence: float                            # 0–100
+    # For the horizontal-only output (trackshot.core.ned): the same motion in the VIO's world frame
+    world_delta: Vec3 = (0.0, 0.0, 0.0)          # FLU world, m (after the camera rotation)
+    vio_yaw: Optional[float] = None              # VIO world yaw of the current pose, FLU (CCW +), rad
+    stamp_us: Optional[int] = None               # the current pose's capture (or arrival) time, µs
 
 
 @dataclass
@@ -105,12 +109,20 @@ def create_camera_rotation_matrix(camera_angle_deg: float) -> list[list[float]]:
 
 def apply_camera_rotation(position: Sequence[float], quaternion: Sequence[float],
                           rotation: Optional[list[list[float]]]) -> tuple[Vec3, Quat]:
-    """Rotates the position by `rotation` and pre-multiplies the orientation by it (q_cam ⊗ q).
+    """The VIO's camera pose → the vehicle's pose, for a camera fixed to the vehicle at a pitch.
 
-    Ported unchanged from the extension. Note what it does and doesn't do: because the same
-    rotation is applied to both the position and the orientation, it cancels out of the body-frame
-    delta (R'ᵀ·Δp' = Rᵀ·R_camᵀ·R_cam·Δp = Rᵀ·Δp) and out of the relative rotation. It changes the
-    reported pose (trajectory display), not what ArduPilot receives.
+    `rotation` (R) maps camera-body axes to vehicle-body axes. For a camera looking straight down
+    with the top of the image towards the bow (90°) that is the camera's optical axis (VIO x) →
+    vehicle down, its left (y) → left, and its image-up (z) → forward.
+
+    The VIO's world frame is the camera's frame when VIO started, so it gets the same rotation:
+    position p' = R·p and orientation q' = R ⊗ q ⊗ R⁻¹. That makes the body-frame deltas, the
+    angle deltas and the yaw the vehicle's own (forward is forward, down is down) and the world
+    level if the vehicle was level at start.
+
+    (The BlueOS extension, and TrackShot ≤ 0.1.1, applied only q' = R ⊗ q, which cancels out of
+    the body-frame deltas: a down-looking camera then sent its forward motion as vertical and
+    its vertical as forward, unless VISO_ORIENT rotated it back on the autopilot.)
     """
     x, y, z = (float(v) for v in position)
     qw0, qx0, qy0, qz0 = (float(v) for v in quaternion)
@@ -127,10 +139,9 @@ def apply_camera_rotation(position: Sequence[float], quaternion: Sequence[float]
     cx = (R[2][1] - R[1][2]) / (4 * cw)
     cy = (R[0][2] - R[2][0]) / (4 * cw)
     cz = (R[1][0] - R[0][1]) / (4 * cw)
-    qw = cw * qw0 - cx * qx0 - cy * qy0 - cz * qz0
-    qx = cw * qx0 + cx * qw0 + cy * qz0 - cz * qy0
-    qy = cw * qy0 - cx * qz0 + cy * qw0 + cz * qx0
-    qz = cw * qz0 + cx * qy0 - cy * qx0 + cz * qw0
+    mount = (cw, cx, cy, cz)
+    mount_inv = (cw, -cx, -cy, -cz)
+    qw, qx, qy, qz = quaternion_multiply(quaternion_multiply(mount, (qw0, qx0, qy0, qz0)), mount_inv)
     norm = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
     return translated, (qw / norm, qx / norm, qy / norm, qz / norm)
 
@@ -162,6 +173,12 @@ def flu_to_frd_frame(v: Sequence[float]) -> Vec3:
     as positions: a left (counter-clockwise from above) turn is +z in FLU and −z in FRD.
     """
     return (v[0], -v[1], -v[2])
+
+
+def quaternion_yaw(q: Sequence[float]) -> float:
+    """Yaw (rotation about world z, counter-clockwise positive in FLU) of a body→world (qw, qx, qy, qz)."""
+    qw, qx, qy, qz = q
+    return math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
 
 
 def quaternion_multiply(a: Sequence[float], b: Sequence[float]) -> Quat:
@@ -355,6 +372,9 @@ class OdometryProcessor:
                 self._span_s = (span_s if self._span_s is None else
                                 (1 - LATENCY_EMA_ALPHA) * self._span_s + LATENCY_EMA_ALPHA * span_s)
             return DeltaMessage(
+                world_delta=world_delta,
+                vio_yaw=quaternion_yaw(quaternion),
+                stamp_us=stamp_us,
                 # Wall clock at send time, as the extension does. ArduPilot doesn't read it (it
                 # stamps the delta on receipt minus VISO_DELAY_MS); it is for logs and other readers
                 time_usec=int(now * 1e6),
@@ -377,7 +397,7 @@ class OdometryProcessor:
             self._lost, self._lost_since, self._acquired = True, self._bad_since, False
             self._losses += 1
             self._log_lost(now, f"VIO tracking lost ({reason} for {now - self._bad_since:.1f} s): "
-                                "not sending VISION_POSITION_DELTA until it recovers")
+                                "not sending odometry until it recovers")
 
     def _acquiring(self, now: float) -> None:
         if self._good_since is None:
@@ -389,7 +409,7 @@ class OdometryProcessor:
                 # Always paired with its "lost" message, so the log never leaves a loss open
                 logger.info(f"VIO tracking regained after {now - self._lost_since:.1f} s: sending again")
             elif not self._ever_acquired:
-                logger.info("VIO tracking established: sending VISION_POSITION_DELTA")
+                logger.info("VIO tracking established: sending odometry")
             self._ever_acquired = True
             self._lost, self._lost_since = False, None
 
@@ -443,6 +463,15 @@ class OdometryProcessor:
             self._jump_times.popleft()
 
     # ----------------------------------------------------------------------------------------
+    def tracking_state(self) -> str:
+        """Cheap per-pose view for the run log: "lost", "acquiring" or "tracking"."""
+        with self._lock:
+            return "lost" if self._lost else "tracking" if self._acquired else "acquiring"
+
+    def is_sending(self) -> bool:
+        with self._lock:
+            return self._acquired and not self._lost
+
     def health(self) -> OdometryHealth:
         now = self._clock()
         with self._lock:

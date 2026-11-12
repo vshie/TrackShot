@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 from pathlib import Path
@@ -837,3 +838,19 @@ def test_screenshot_with_fake_data(make_window, qtbot):
     assert engine.state == STATE_RUNNING
     engine.stop()
     assert engine.state == STATE_STOPPED
+
+
+def test_map_goes_north_up_with_the_compass_heading_once_the_autopilot_attitude_is_known(window):
+    from trackshot.vio.source import PoseSample
+    traj = window.trajectory
+    s = PoseSample(t_capture_us=None, t_received=1000.0, position=(0, 0, 0), quaternion=(1, 0, 0, 0))
+    traj.add_pose((s, (1.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0), None))           # VIO frame first
+    traj.refresh()
+    assert "VIO" in traj.info.text()
+    traj.add_pose((s, (1.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0), (10.0, -3.0, math.radians(90.0))))
+    traj.refresh()
+    # North-up: east on x, north on y; heading 90° (east) points along +x on screen
+    assert traj.point_count() == 1                                           # the VIO-frame point was dropped
+    assert traj.arrow.pos().x() == pytest.approx(-3.0) and traj.arrow.pos().y() == pytest.approx(10.0)
+    assert "heading 90° (compass)" in traj.info.text()
+    assert traj.plot.getAxis("left").labelText == "north"

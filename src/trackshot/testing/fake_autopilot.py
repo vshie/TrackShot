@@ -79,8 +79,10 @@ DEFAULT_PARAMS = {
     "EK3_SRC1_POSXY": 3.0,     # GPS
     "EK3_SRC1_VELXY": 3.0,
     "EK3_SRC1_POSZ": 1.0,
+    "EK3_SRC1_VELZ": 0.0,      # TrackShot wants 0 (the depth sensor alone sets the vertical)
     "EK3_SRC_OPTIONS": 1.0,
     "VISO_DELAY_MS": 10.0,
+    "VISO_ORIENT": 0.0,
     "SURFACE_DEPTH": -10.0,
 }
 DEFAULT_PARAM_TYPES = {
@@ -117,6 +119,7 @@ class VehicleState:
     altitude_m: Optional[float] = 1.5   # rangefinder; None = no DISTANCE_SENSOR
     mission_seq: int = 0
     origin: Optional[tuple[float, float]] = (-33.8570, 151.2150)   # EKF origin, None = not set
+    local_ne: Optional[tuple[float, float]] = (12.5, -3.25)          # EKF local position, None = none
 
 
 def _message_class(name: str):
@@ -449,6 +452,9 @@ class FakeAutopilot:
              "mission_state": {"type": "MISSION_STATE_UNKNOWN"},
              "mission_mode": 0, "mission_id": 0, "fence_id": 0, "rally_points_id": 0},
         ]
+        if v.local_ne is not None:
+            messages.append({"type": "LOCAL_POSITION_NED", "time_boot_ms": boot_ms, "x": v.local_ne[0],
+                             "y": v.local_ne[1], "z": v.depth_m, "vx": 0.0, "vy": 0.0, "vz": 0.0})
         if v.altitude_m is not None:
             messages.append(
                 {"type": "DISTANCE_SENSOR", "time_boot_ms": boot_ms, "min_distance": 20,

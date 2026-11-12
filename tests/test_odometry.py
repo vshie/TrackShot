@@ -165,37 +165,56 @@ def _normalised(q):
     return tuple(v / n for v in q)
 
 
-@pytest.mark.parametrize("angle", [0.0, 30.0, 45.0, 90.0, -20.0])
-def test_camera_angle_matches_reference(angle):
+def test_camera_angle_zero_matches_reference():
+    """With no mount angle, the math is the extension's, unchanged."""
     q0 = _normalised((0.9, 0.1, -0.2, 0.3))
     q1 = _normalised((0.88, 0.12, -0.21, 0.33))
     p0, p1 = (0.4, -0.3, 0.2), (0.45, -0.28, 0.17)
-    ref = _ReferenceMath(angle)
+    ref = _ReferenceMath(0.0)
     t0, r0 = ref.apply_camera_rotation(_vec(p0), _quat(q0))
     t1, r1 = ref.apply_camera_rotation(_vec(p1), _quat(q1))
     world_delta = [t1.x - t0.x, t1.y - t0.y, t1.z - t0.z]
     expected = ref.flu_to_frd_frame(ref.world_to_body_frame(world_delta, r1))
-
-    proc = OdometryProcessor(camera_angle_deg=angle)
+    proc = OdometryProcessor(camera_angle_deg=0.0)
     proc.process(sample(T0_US, p0, q0))
     d = proc.process(sample(T0_US + 100_000, p1, q1))
     assert d.position_delta == pytest.approx(tuple(expected), abs=1e-12)
-    assert proc.health().last_pose == pytest.approx((t1.x, t1.y, t1.z, r1.qw, r1.qx, r1.qy, r1.qz), abs=1e-12)
 
 
-def test_camera_angle_cancels_out_of_the_delta():
-    # The extension rotates position and orientation by the same R_cam, so
-    # R'ᵀ·Δp' = (R_cam·R)ᵀ·R_cam·Δp = Rᵀ·Δp: the angle changes the reported pose, not the delta.
-    q0 = _normalised((0.9, 0.1, -0.2, 0.3))
-    q1 = _normalised((0.88, 0.12, -0.21, 0.33))
-    deltas = []
-    for angle in (0.0, 45.0, 90.0):
-        proc = OdometryProcessor(camera_angle_deg=angle)
-        proc.process(sample(T0_US, (0.4, -0.3, 0.2), q0))
-        deltas.append(proc.process(sample(T0_US + 100_000, (0.45, -0.28, 0.17), q1)))
-    for d in deltas[1:]:
-        assert d.position_delta == pytest.approx(deltas[0].position_delta, abs=1e-12)
-        assert d.angle_delta == pytest.approx(deltas[0].angle_delta, abs=1e-12)
+# A camera looking straight down, top of the image towards the bow (camera_angle_deg 90). The VIO
+# reports the camera's pose in FLU camera terms: x = optical axis (down on the vehicle), y = image
+# left (vehicle left), z = image up (vehicle forward). The vehicle-frame deltas must come out FRD.
+@pytest.mark.parametrize("camera_move, frd", [
+    ((0.0, 0.0, 0.1), (0.1, 0.0, 0.0)),     # image-up = forward
+    ((0.0, 0.0, -0.1), (-0.1, 0.0, 0.0)),   # backwards
+    ((0.1, 0.0, 0.0), (0.0, 0.0, 0.1)),     # along the optical axis = down
+    ((0.0, 0.1, 0.0), (0.0, -0.1, 0.0)),    # image-left = vehicle left = FRD −y
+])
+def test_down_looking_camera_moves_in_vehicle_axes(camera_move, frd):
+    proc = OdometryProcessor(camera_angle_deg=90.0)
+    proc.process(sample(T0_US, (0.0, 0.0, 0.0)))
+    d = proc.process(sample(T0_US + 100_000, camera_move))
+    assert d.position_delta == pytest.approx(frd, abs=1e-12)
+    # and the world-frame motion (for the horizontal-only output) is level: forward is world +x
+    flu = (frd[0], -frd[1], -frd[2])
+    assert d.world_delta == pytest.approx(flu, abs=1e-12)
+
+
+def test_down_looking_camera_at_rest_is_a_level_vehicle():
+    proc = OdometryProcessor(camera_angle_deg=90.0)
+    proc.process(sample(T0_US, (0.0, 0.0, 0.0)))
+    assert proc.health().last_pose[3:] == pytest.approx((1.0, 0.0, 0.0, 0.0), abs=1e-12)
+
+
+def test_down_looking_camera_turning_right_is_positive_yaw():
+    # Turning right (clockwise seen from above) spins the down-looking camera about its optical
+    # axis (x), right-handed about "down": +10° about camera x. FRD yaw +10°; FLU yaw −10°.
+    half = math.radians(10) / 2
+    proc = OdometryProcessor(camera_angle_deg=90.0)
+    proc.process(sample(T0_US, (0.0, 0.0, 0.0)))
+    d = proc.process(sample(T0_US + 100_000, (0.0, 0.0, 0.0001), (math.cos(half), math.sin(half), 0.0, 0.0)))
+    assert d.angle_delta == pytest.approx((0.0, 0.0, math.radians(10)), abs=1e-9)
+    assert d.vio_yaw == pytest.approx(-math.radians(10), abs=1e-9)
 
 
 def test_camera_down_90_rotates_reported_pose():

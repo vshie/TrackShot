@@ -304,7 +304,9 @@ class SettingsPanel(QWidget):
         size.addWidget(QLabel("×"))
         size.addWidget(self.height_spin)
         form.addRow("Resolution", size)
-        self.camera_angle = self._dspin("camera_angle_deg", -90, 90, 5, 1, "°", "0 = looking forward, 90 = straight down")
+        self.camera_angle = self._dspin("camera_angle_deg", -90, 90, 5, 1, "°", "How the camera is fixed to the vehicle: 0 = looking forward, 90 = straight down with the top of "
+                                       "the image towards the bow. TrackShot turns the camera's motion into the vehicle's "
+                                       "(forward, right, down) with it, so set VISO_ORIENT = 0 on the autopilot.")
         form.addRow("Camera angle", self.camera_angle)
 
         self.rtabmap_box = QGroupBox("RTAB-Map")
@@ -333,6 +335,15 @@ class SettingsPanel(QWidget):
         self.transport = self._choice("transport", [("mavlink2rest (BlueOS WebSocket)", "mavlink2rest"),
                                                     ("UDP (pymavlink)", "udp")])
         form.addRow("Transport", self.transport)
+        self.odometry_output = self._choice("odometry_output", [
+            ("Position + speed, horizontal only", "position_speed"),
+            ("Position delta (0.1.x, all three axes)", "position_delta")])
+        self.odometry_output.setToolTip(
+            "Horizontal only: VISION_POSITION_ESTIMATE + VISION_SPEED_ESTIMATE. The autopilot keeps its "
+            "depth sensor for everything vertical (needs EK3_SRC1_VELZ = 0; check it in the Autopilot panel).\n"
+            "Position delta: VISION_POSITION_DELTA, which ArduSub fuses on all three axes, so the camera's "
+            "vertical motion also feeds the depth estimate.")
+        form.addRow("Send VIO as", self.odometry_output)
         form.addRow("Vehicle IP", self._line(
             "vehicle_ip", "192.168.2.2",
             "The ROV's BlueOS. Parameters and telemetry for the images come from here."))
