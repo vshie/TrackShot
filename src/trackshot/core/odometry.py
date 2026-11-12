@@ -1,0 +1,384 @@
+"""VIO pose → VISION_POSITION_DELTA math, ported from the BlueOS extension's `app/mavlink_node.py`.
+
+Pure Python (no depthai, no Qt) so it can be tested by hand-derived golden values and fed by any
+`PoseSource`. One `OdometryProcessor` is fed every pose from the source's thread; `health()` is read
+from the GUI's stats timer, so all state sits behind one lock.
+
+Frames (see docs/ARCHITECTURE.md):
+- the VIO world frame is FLU (x forward, y left, z up) and quaternions are (qw, qx, qy, qz),
+  body→world;
+- ArduPilot wants `position_delta` and `angle_delta` in the vehicle body frame, FRD
+  (x forward, y right, z down).
+"""
+
+from __future__ import annotations
+
+import math
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass
+from typing import Callable, Optional, Sequence
+
+from loguru import logger
+
+from trackshot.vio.source import PoseSample
+
+Vec3 = tuple[float, float, float]
+Quat = tuple[float, float, float, float]   # (qw, qx, qy, qz)
+
+# Latency EMA weight: the extension's 0.9/0.1 smoothing, steady enough to suggest VISO_DELAY_MS.
+# The delta spans are smoothed the same way.
+LATENCY_EMA_ALPHA = 0.1
+# Host → autopilot transit of a queued VISION_POSITION_DELTA (sender thread, mavlink2rest or UDP,
+# BlueOS's serial link to the flight controller): a few milliseconds, not measured
+HOST_TO_AUTOPILOT_MS = 5.0
+# A capture→host latency outside this is an unset or bogus timestamp, not a measurement
+MAX_PLAUSIBLE_LATENCY_S = 5.0
+# Deltas shorter than this would divide noise by almost nothing (the extension's 1 ms floor)
+MIN_DELTA_SPAN_US = 1000
+# ArduPilot's VISO_DELAY_MS range
+VISO_DELAY_MIN_MS = 0
+VISO_DELAY_MAX_MS = 250
+FPS_WINDOW_S = 2.0
+STALL_AFTER_S = 1.0
+# "degraded" when the VIO keeps jumping: this many rejected jumps inside the window
+DEGRADED_JUMPS = 3
+DEGRADED_WINDOW_S = 10.0
+JUMP_LOG_INTERVAL_S = 5.0
+
+
+@dataclass(frozen=True)
+class DeltaMessage:
+    time_usec: int                               # host wall clock µs when the delta was made
+    time_delta_usec: int                         # span between the two poses' capture times
+    position_delta: Vec3                         # FRD body, m
+    angle_delta: Vec3                            # FRD body rotation vector prev→current, rad
+    confidence: float                            # 0–100
+
+
+@dataclass
+class OdometryHealth:
+    fps: float
+    latency_ms: Optional[float]
+    suggested_viso_delay_ms: Optional[int]
+    poses: int
+    deltas: int
+    jumps: int
+    rejected_spans: int
+    last_pose: Optional[tuple]                   # (x, y, z, qw, qx, qy, qz) after camera rotation
+    last_pose_age_s: Optional[float]
+    stalled: bool                                # no pose for > 1 s
+    tracking: str                                # "good" | "degraded" | "lost" | "unknown"
+
+
+# --- Frame math (straight ports of the extension's MavlinkNode methods) ---------------------------
+
+def create_camera_rotation_matrix(camera_angle_deg: float) -> list[list[float]]:
+    """Pitch (about y) by the camera's mounting angle, exactly as the extension builds it."""
+    angle_rad = math.radians(camera_angle_deg)
+    cos_a = math.cos(angle_rad)
+    sin_a = math.sin(angle_rad)
+    return [
+        [cos_a, 0.0, sin_a],
+        [0.0, 1.0, 0.0],
+        [-sin_a, 0.0, cos_a],
+    ]
+
+
+def apply_camera_rotation(position: Sequence[float], quaternion: Sequence[float],
+                          rotation: Optional[list[list[float]]]) -> tuple[Vec3, Quat]:
+    """Rotates the position by `rotation` and pre-multiplies the orientation by it (q_cam ⊗ q).
+
+    Ported unchanged from the extension. Note what it does and doesn't do: because the same
+    rotation is applied to both the position and the orientation, it cancels out of the body-frame
+    delta (R'ᵀ·Δp' = Rᵀ·R_camᵀ·R_cam·Δp = Rᵀ·Δp) and out of the relative rotation. It changes the
+    reported pose (trajectory display), not what ArduPilot receives.
+    """
+    x, y, z = (float(v) for v in position)
+    qw0, qx0, qy0, qz0 = (float(v) for v in quaternion)
+    if rotation is None:
+        return (x, y, z), (qw0, qx0, qy0, qz0)
+    R = rotation
+    translated = (
+        R[0][0] * x + R[0][1] * y + R[0][2] * z,
+        R[1][0] * x + R[1][1] * y + R[1][2] * z,
+        R[2][0] * x + R[2][1] * y + R[2][2] * z,
+    )
+    # Rotation matrix → quaternion (trace form; the trace is ≥ 1 for any pitch in ±90°)
+    cw = math.sqrt(1 + R[0][0] + R[1][1] + R[2][2]) / 2
+    cx = (R[2][1] - R[1][2]) / (4 * cw)
+    cy = (R[0][2] - R[2][0]) / (4 * cw)
+    cz = (R[1][0] - R[0][1]) / (4 * cw)
+    qw = cw * qw0 - cx * qx0 - cy * qy0 - cz * qz0
+    qx = cw * qx0 + cx * qw0 + cy * qz0 - cz * qy0
+    qy = cw * qy0 - cx * qz0 + cy * qw0 + cz * qx0
+    qz = cw * qz0 + cx * qy0 - cy * qx0 + cz * qw0
+    norm = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
+    return translated, (qw / norm, qx / norm, qy / norm, qz / norm)
+
+
+def quaternion_to_rotation_matrix(q: Sequence[float]) -> list[list[float]]:
+    """Body→world rotation matrix of a (qw, qx, qy, qz) quaternion."""
+    qw, qx, qy, qz = q
+    return [
+        [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qw * qz), 2 * (qx * qz + qw * qy)],
+        [2 * (qx * qy + qw * qz), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qw * qx)],
+        [2 * (qx * qz - qw * qy), 2 * (qy * qz + qw * qx), 1 - 2 * (qx * qx + qy * qy)],
+    ]
+
+
+def world_to_body_frame(world_vector: Sequence[float], q: Sequence[float]) -> Vec3:
+    """v_body = Rᵀ·v_world, R being body→world, so Rᵀ takes world vectors into the body frame."""
+    R = quaternion_to_rotation_matrix(q)
+    return (
+        R[0][0] * world_vector[0] + R[1][0] * world_vector[1] + R[2][0] * world_vector[2],
+        R[0][1] * world_vector[0] + R[1][1] * world_vector[1] + R[2][1] * world_vector[2],
+        R[0][2] * world_vector[0] + R[1][2] * world_vector[1] + R[2][2] * world_vector[2],
+    )
+
+
+def flu_to_frd_frame(v: Sequence[float]) -> Vec3:
+    """FLU → FRD: forward stays, left becomes right (−y), up becomes down (−z).
+
+    diag(1, −1, −1) is a proper rotation (180° about x), so it maps rotation vectors the same way
+    as positions: a left (counter-clockwise from above) turn is +z in FLU and −z in FRD.
+    """
+    return (v[0], -v[1], -v[2])
+
+
+def quaternion_multiply(a: Sequence[float], b: Sequence[float]) -> Quat:
+    """Hamilton product a ⊗ b."""
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return (
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    )
+
+
+def relative_rotation_vector(q_prev: Sequence[float], q_cur: Sequence[float]) -> Vec3:
+    """Rotation from the previous to the current orientation, in the previous body frame (FLU).
+
+    With R body→world, R_cur = R_prev·R_rel, so q_rel = q_prev⁻¹ ⊗ q_cur. Returned as a rotation
+    vector (axis × angle, rad) on the short way round.
+    """
+    pw, px, py, pz = q_prev
+    norm_sq = pw * pw + px * px + py * py + pz * pz
+    q_prev_inv = (pw / norm_sq, -px / norm_sq, -py / norm_sq, -pz / norm_sq)
+    w, x, y, z = quaternion_multiply(q_prev_inv, q_cur)
+    if w < 0.0:   # q and −q are the same rotation; pick the one with angle ≤ π
+        w, x, y, z = -w, -x, -y, -z
+    sin_half = math.sqrt(x * x + y * y + z * z)
+    if sin_half < 1e-12:
+        return (0.0, 0.0, 0.0)
+    angle = 2.0 * math.atan2(sin_half, w)
+    scale = angle / sin_half
+    return (x * scale, y * scale, z * scale)
+
+
+def viso_delay_estimate_ms(latency_ms: Optional[float], span_ms: Optional[float]) -> Optional[float]:
+    """How long before its arrival at the autopilot a VISION_POSITION_DELTA's velocity was true.
+
+    ArduPilot ignores VISION_POSITION_DELTA.time_usec: it stamps each delta with its own clock on
+    receipt minus VISO_DELAY_MS (AP_VisualOdom_Backend::handle_vision_position_delta_msg), and the
+    EKF fuses delPos/delTime as the velocity at that instant (writeBodyFrameOdom, which, unlike
+    optical flow, applies no half-interval correction). That velocity is the average over the span
+    between the two poses' captures, so it belongs to the span's midpoint: half a span before the
+    newer capture. The delay to compensate is therefore capture→host latency + half the span +
+    the host→autopilot transit.
+    """
+    if latency_ms is None:
+        return None
+    return latency_ms + 0.5 * (span_ms or 0.0) + HOST_TO_AUTOPILOT_MS
+
+
+def suggest_viso_delay_ms(delay_ms: Optional[float]) -> Optional[int]:
+    """A delay (see `viso_delay_estimate_ms`) rounded to the nearest 10 ms, within VISO_DELAY_MS's range."""
+    if delay_ms is None:
+        return None
+    rounded = int(math.floor(delay_ms / 10.0 + 0.5)) * 10
+    return max(VISO_DELAY_MIN_MS, min(VISO_DELAY_MAX_MS, rounded))
+
+
+# --- Processor ------------------------------------------------------------------------------------
+
+class OdometryProcessor:
+    """Turns successive poses into body-frame deltas, rejecting VIO jumps and bad time spans."""
+
+    def __init__(self, camera_angle_deg: float = 0.0, max_speed_mps: float = 3.0,
+                 max_span_s: float = 2.0, clock: Callable[[], float] = time.time):
+        self.camera_angle_deg = float(camera_angle_deg)
+        self.max_speed_mps = float(max_speed_mps)
+        self.max_span_us = int(max_span_s * 1e6)
+        self._clock = clock
+        self._camera_rotation = (create_camera_rotation_matrix(self.camera_angle_deg)
+                                 if self.camera_angle_deg != 0.0 else None)
+        self._lock = threading.Lock()
+        self._reset_locked()
+
+    def reset(self) -> None:
+        with self._lock:
+            self._reset_locked()
+
+    def _reset_locked(self) -> None:
+        # Differencing chain: the previous pose, its timestamp and which clock that came from
+        self._prev_position: Optional[Vec3] = None
+        self._prev_quaternion: Optional[Quat] = None
+        self._prev_us: Optional[int] = None
+        self._prev_clock_kind: Optional[str] = None
+        # Health
+        self._latency_s: Optional[float] = None
+        self._span_s: Optional[float] = None
+        self._poses = 0
+        self._deltas = 0
+        self._jumps = 0
+        self._rejected_spans = 0
+        self._last_pose: Optional[tuple] = None
+        self._last_pose_time: Optional[float] = None
+        self._last_tracking: Optional[bool] = None
+        self._first_pose_time: Optional[float] = None
+        self._pose_times: deque[float] = deque()
+        self._jump_times: deque[float] = deque()
+        self._last_jump_log = -math.inf
+
+    # ----------------------------------------------------------------------------------------
+    def process(self, sample: PoseSample) -> Optional[DeltaMessage]:
+        """Feeds one pose. Returns the delta since the previous pose, or None if there is none to send."""
+        now = self._clock()
+        with self._lock:
+            raw = (*sample.position, *sample.quaternion)
+            if not all(math.isfinite(v) for v in raw) or not any(raw[3:]):
+                # A broken VIO output is a jump like any other: never difference across it
+                self._count_jump(now, "invalid pose")
+                self._restart_chain(None, None, None, None)
+                return None
+            position, quaternion = apply_camera_rotation(sample.position, sample.quaternion,
+                                                         self._camera_rotation)
+            self._record_pose(now, sample, position, quaternion)
+
+            # The delta's span must come from capture times: arrival times jitter with host load
+            # and the EKF divides the delta by this span. A sample without a capture time falls
+            # back to its arrival time, and a chain never spans the two clocks.
+            if sample.t_capture_us is not None:
+                stamp_us, clock_kind = int(sample.t_capture_us), "capture"
+            else:
+                stamp_us, clock_kind = int(sample.t_received * 1e6), "received"
+
+            if self._prev_us is None or self._prev_clock_kind != clock_kind:
+                self._restart_chain(position, quaternion, stamp_us, clock_kind)
+                return None
+
+            dt_us = stamp_us - self._prev_us
+            if dt_us < 0 or dt_us > self.max_span_us or dt_us < MIN_DELTA_SPAN_US:
+                # Out of order, a stall, or too short to divide by: start again from this pose
+                self._rejected_spans += 1
+                self._restart_chain(position, quaternion, stamp_us, clock_kind)
+                return None
+
+            prev = self._prev_position
+            world_delta = (position[0] - prev[0], position[1] - prev[1], position[2] - prev[2])
+            speed = math.sqrt(sum(d * d for d in world_delta)) / (dt_us / 1e6)
+            # The VIO lost track or reset: RTAB-Map snaps back to the origin, and either backend
+            # can jump. Sent as a delta, that jump would look to the EKF like a sudden move and kick
+            # position hold, so skip it and carry on from the new pose.
+            prev_moved = any(v != 0.0 for v in prev)
+            snapped_to_origin = prev_moved and position[0] == position[1] == position[2] == 0.0
+            if speed > self.max_speed_mps or snapped_to_origin:
+                self._count_jump(now, "snapped back to the origin" if snapped_to_origin
+                                 else f"implied {speed:.1f} m/s")
+                self._restart_chain(position, quaternion, stamp_us, clock_kind)
+                return None
+
+            position_delta = flu_to_frd_frame(world_to_body_frame(world_delta, quaternion))
+            angle_delta = flu_to_frd_frame(relative_rotation_vector(self._prev_quaternion, quaternion))
+            self._restart_chain(position, quaternion, stamp_us, clock_kind)
+            self._deltas += 1
+            if clock_kind == "capture":
+                span_s = dt_us / 1e6
+                self._span_s = (span_s if self._span_s is None else
+                                (1 - LATENCY_EMA_ALPHA) * self._span_s + LATENCY_EMA_ALPHA * span_s)
+            return DeltaMessage(
+                # Wall clock at send time, as the extension does. ArduPilot doesn't read it (it
+                # stamps the delta on receipt minus VISO_DELAY_MS); it is for logs and other readers
+                time_usec=int(now * 1e6),
+                time_delta_usec=dt_us,
+                position_delta=position_delta,
+                angle_delta=angle_delta,
+                confidence=0.0 if sample.tracking is False else 100.0,
+            )
+
+    def _restart_chain(self, position: Optional[Vec3], quaternion: Optional[Quat],
+                       stamp_us: Optional[int], clock_kind: Optional[str]) -> None:
+        self._prev_position = position
+        self._prev_quaternion = quaternion
+        self._prev_us = stamp_us
+        self._prev_clock_kind = clock_kind
+
+    def _record_pose(self, now: float, sample: PoseSample, position: Vec3, quaternion: Quat) -> None:
+        if sample.t_capture_us is not None:
+            latency_s = sample.t_received - sample.t_capture_us / 1e6
+            if 0.0 <= latency_s < MAX_PLAUSIBLE_LATENCY_S:
+                # Capture-to-host delay, smoothed; one part of the suggested VISO_DELAY_MS
+                self._latency_s = (latency_s if self._latency_s is None else
+                                   (1 - LATENCY_EMA_ALPHA) * self._latency_s + LATENCY_EMA_ALPHA * latency_s)
+        self._last_pose = (*position, *quaternion)
+        self._last_pose_time = now
+        self._last_tracking = sample.tracking
+        if self._first_pose_time is None:
+            self._first_pose_time = now
+        self._poses += 1
+        self._pose_times.append(now)
+        self._prune(now)
+
+    def _count_jump(self, now: float, reason: str) -> None:
+        self._jumps += 1
+        self._jump_times.append(now)
+        if now - self._last_jump_log > JUMP_LOG_INTERVAL_S:
+            self._last_jump_log = now
+            logger.warning(f"Skipped a VIO pose jump ({reason}); {self._jumps} so far")
+
+    def _prune(self, now: float) -> None:
+        while self._pose_times and now - self._pose_times[0] > FPS_WINDOW_S:
+            self._pose_times.popleft()
+        while self._jump_times and now - self._jump_times[0] > DEGRADED_WINDOW_S:
+            self._jump_times.popleft()
+
+    # ----------------------------------------------------------------------------------------
+    def health(self) -> OdometryHealth:
+        now = self._clock()
+        with self._lock:
+            self._prune(now)
+            fps = 0.0
+            if self._first_pose_time is not None:
+                # Until the window has filled, divide by the time we've actually been receiving
+                window = min(FPS_WINDOW_S, now - self._first_pose_time)
+                if window > 0:
+                    fps = len(self._pose_times) / window
+            age = None if self._last_pose_time is None else now - self._last_pose_time
+            stalled = age is not None and age > STALL_AFTER_S
+            if self._poses == 0:
+                tracking = "unknown"
+            elif stalled or self._last_tracking is False:
+                tracking = "lost"
+            elif len(self._jump_times) >= DEGRADED_JUMPS:
+                tracking = "degraded"
+            else:
+                tracking = "good"
+            latency_ms = None if self._latency_s is None else self._latency_s * 1000.0
+            span_ms = None if self._span_s is None else self._span_s * 1000.0
+            return OdometryHealth(
+                fps=fps,
+                latency_ms=latency_ms,
+                suggested_viso_delay_ms=suggest_viso_delay_ms(viso_delay_estimate_ms(latency_ms, span_ms)),
+                poses=self._poses,
+                deltas=self._deltas,
+                jumps=self._jumps,
+                rejected_spans=self._rejected_spans,
+                last_pose=self._last_pose,
+                last_pose_age_s=age,
+                stalled=stalled,
+                tracking=tracking,
+            )
