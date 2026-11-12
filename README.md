@@ -79,6 +79,41 @@ goes to `~/Library/Logs/TrackShot/trackshot.log` (and the Log panel).
 sends MAVLink only to a loopback address such as the fake autopilot below. Otherwise it logs a
 warning and keeps the link closed, so simulated motion can't reach a real EKF.
 
+### When the VIO loses tracking
+
+TrackShot sends `VISION_POSITION_DELTA` only while the VIO is actually tracking. ArduSub fuses
+every delta whatever its confidence, so a wrong "not moving" is worse than nothing.
+
+- **Start-up and after a loss:** the Tracking card shows **Acquiring**. Nothing is sent until the
+  VIO has produced 10 distinct poses over at least 0.5 s. Starting VIO before the camera can see
+  the seabed is therefore safe; it begins sending once it tracks.
+- **Frozen VIO:** RTAB-Map, once lost, keeps reporting its last pose unchanged. Real VIO output
+  always carries some noise, so a pose repeated exactly is never sent. If it repeats for 1 s, the
+  card shows **Lost** with how long, nothing is sent, and Cockpit's `TS_TRACK` drops to 0.
+- **Recovery:**
+  - RTAB-Map resets itself to its latest pose after 3 s of lost frames, and retries every 3 s
+    while still lost (`Odom/ResetCountdown`). That happens on RTAB-Map's own thread.
+  - TrackShot never resets or restarts anything automatically.
+  - Once poses move again, TrackShot re-acquires and resumes sending. Nothing is sent across the
+    gap.
+- **Restart VIO** (toolbar, ⌘⇧R): reconnects the camera and starts the VIO afresh (about 15 s),
+  for example once the camera sees the seabed.
+  - It's available only while VIO is running, and not again within 20 s of the last restart.
+  - The tooltip says why it is unavailable.
+- **The log:** "lost" and "regained" messages come in pairs, with at most one "lost" message
+  every 10 s. Losses in between are counted into the next message.
+
+`TS_TRACK` values for Cockpit:
+
+| Value | Meaning |
+|---|---|
+| 1 | Good |
+| 0.5 | Degraded |
+| 0.25 | Acquiring |
+| 0 | Lost, or not started |
+
+Below 0.5, TrackShot is not sending.
+
 ## Dry runs with the fake autopilot
 
 `tools/fake_autopilot.py` is an in-process fake BlueOS. It provides mavlink2rest (HTTP and

@@ -169,13 +169,19 @@ def test_basalt_node_accepts_the_config():
 
 
 def test_rtabmap_params_on_the_real_node():
-    params = op.rtabmap_params(Settings(rtabmap_features=400, rtabmap_local_map_size=800))
-    assert params == {"OdomF2M/MaxSize": "800", "Vis/MaxFeatures": "400"}
+    params = op.rtabmap_params(Settings(rtabmap_features=400, rtabmap_local_map_size=800, fps=20))
+    # RTAB-Map resets itself after 3 s of lost frames (60 at 20 fps) instead of staying lost
+    assert params == {"OdomF2M/MaxSize": "800", "Vis/MaxFeatures": "400", "Odom/ResetCountdown": "60"}
     pipeline = dai.Pipeline(False)
     odom = pipeline.create(dai.node.RTABMapVIO)
     odom.setParams(params)
     for out in (odom.transform, odom.passthroughRect):
         assert out.createOutputQueue(maxSize=2, blocking=False) is not None
+
+
+@pytest.mark.parametrize("fps, frames", [(10, 30), (15, 45), (20, 60), (0.2, 1)])
+def test_rtabmap_reset_countdown_is_seconds_of_frames(fps, frames):
+    assert op.rtabmap_reset_countdown(fps) == frames
 
 
 # --- Frame helpers -------------------------------------------------------------------------------

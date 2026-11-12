@@ -14,8 +14,9 @@ from trackshot.core.odometry import DeltaMessage, OdometryHealth
 
 NAMED_VALUE_NAME_MAX = 10   # NAMED_VALUE_FLOAT.name is char[10]
 
-# Cockpit shows these as NAMED_VALUE_FLOAT; tracking as a number so it can be graphed/alerted on
-TRACKING_VALUES = {"good": 1.0, "degraded": 0.5, "lost": 0.0, "unknown": 0.0}
+# Cockpit shows these as NAMED_VALUE_FLOAT; tracking as a number so it can be graphed/alerted on.
+# Below 0.5, TrackShot is not sending VISION_POSITION_DELTA (acquiring, lost or not started).
+TRACKING_VALUES = {"good": 1.0, "degraded": 0.5, "acquiring": 0.25, "lost": 0.0, "unknown": 0.0}
 
 
 def vision_position_delta(d: DeltaMessage) -> tuple[str, dict]:

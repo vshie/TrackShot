@@ -107,6 +107,11 @@ class MainWindow(QMainWindow):
         self.stop_action.setShortcut("Ctrl+.")
         self.stop_action.setToolTip("Stop VIO and release the camera (⌘.)")
         self.stop_action.triggered.connect(self.engine.stop)
+        self.restart_action = QAction(style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload), "Restart VIO", self)
+        self.restart_action.setShortcut("Ctrl+Shift+R")
+        self.restart_action.triggered.connect(self.engine.restart_vio)
+        self._restart_tooltip(None)
+        self.restart_action.setEnabled(False)
         self.preview_action = QAction("Preview", self)
         self.preview_action.setCheckable(True)
         self.preview_action.setToolTip("Show the camera preview. The VIO preview costs no tether bandwidth.")
@@ -123,6 +128,7 @@ class MainWindow(QMainWindow):
         bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         bar.addAction(self.start_action)
         bar.addAction(self.stop_action)
+        bar.addAction(self.restart_action)
         bar.addSeparator()
         bar.addWidget(QLabel(" Source "))
         self.source_combo = QComboBox()
@@ -269,6 +275,7 @@ class MainWindow(QMainWindow):
         active = state in ACTIVE_STATES
         self.start_action.setEnabled(not active)
         self.stop_action.setEnabled(active)
+        self._update_restart_action()
         self.status_panel.set_state(state, message)
         self._state = state
         self._paint_badge()
@@ -283,7 +290,19 @@ class MainWindow(QMainWindow):
             f"color: {css(colour)}; border: 1.5px solid {css(colour)}; border-radius: 9px;"
             " padding: 2px 6px; font-weight: 700;")
 
+    def _restart_tooltip(self, blocked: Optional[str]) -> None:
+        tip = ("Reconnect the camera and start the VIO afresh (⌘⇧R), e.g. once the camera sees the "
+               "seabed. RTAB-Map already resets itself after a few seconds lost.")
+        self.restart_action.setToolTip(tip if blocked is None else f"{tip}\nNot available: {blocked}")
+
+    def _update_restart_action(self) -> None:
+        blocked = self.engine.restart_vio_blocked()
+        if self.restart_action.isEnabled() != (blocked is None) or blocked is not None:
+            self.restart_action.setEnabled(blocked is None)
+            self._restart_tooltip(blocked)
+
     def _on_status(self, status: dict) -> None:
+        self._update_restart_action()
         self.status_panel.update_status(status, expected_fps=float(self._applied.fps))
         source = status.get("source")
         self.bandwidth.set_measured(value(source, "rx_mbit"))

@@ -180,12 +180,26 @@ def basalt_vio_config(settings) -> "dai.VioConfig":
     return cfg
 
 
+# RTAB-Map's odometry stays lost for good once it loses tracking (Odom/ResetCountdown 0, its
+# default) and keeps reporting its last pose. With a countdown of N it resets itself to that latest
+# pose after N consecutive lost frames, and again every N while still lost. That runs on RTAB-Map's
+# own thread; depthai's RTABMapVIO.reset() would instead race the node's processing thread (it
+# takes no lock), so TrackShot never calls it. N is this many seconds of frames: retrying every few
+# seconds, not every frame.
+RTABMAP_RESET_AFTER_S = 3.0
+
+
+def rtabmap_reset_countdown(fps: float) -> int:
+    return max(1, round(float(fps) * RTABMAP_RESET_AFTER_S))
+
+
 def rtabmap_params(settings) -> dict[str, str]:
     # The odometry is one host thread and limits the frame rate. Frame-to-map matching cost grows
     # with the local map, so it is kept smaller than RTAB-Map's 2000.
     return {
         "OdomF2M/MaxSize": str(settings.rtabmap_local_map_size),
         "Vis/MaxFeatures": str(settings.rtabmap_features),
+        "Odom/ResetCountdown": str(rtabmap_reset_countdown(settings.fps)),
     }
 
 

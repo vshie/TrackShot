@@ -39,7 +39,7 @@ class Theme:
     def level(self, level: str | None) -> QColor:
         """Colour for a status level: ok / warn / bad (anything else is neutral)."""
         return {"ok": self.ok, "good": self.ok, "warn": self.warn, "degraded": self.warn,
-                "bad": self.bad, "lost": self.bad, "error": self.bad}.get(level or "", self.neutral)
+                "bad": self.bad, "lost": self.bad, "error": self.bad, "acquiring": self.warn}.get(level or "", self.neutral)
 
 
 _LIGHT = dict(ok="#1a7f37", warn="#9a6700", bad="#cf222e", info="#0969da", neutral="#57606a",

@@ -146,6 +146,41 @@ def test_lost_tracking_is_red(window):
     assert window.status_panel.cards["tracking"].level == "lost"
 
 
+def test_frozen_vio_card_says_not_sending_and_how_long(window):
+    odo = odometry_health(tracking="lost", sending=False, lost_for_s=12.4, losses=2)
+    window.engine.statusUpdated.emit(make_status(odometry=odo))
+    card = window.status_panel.cards["tracking"]
+    assert card_text(window, "tracking") == "Lost 12 s"
+    assert card.level == "lost"
+    assert "Not sending" in card.detail.text() and "Restart VIO" in card.detail.text()
+    assert "lost 2× this run" in card.detail.text()
+
+
+def test_acquiring_card(window):
+    window.engine.statusUpdated.emit(make_status(odometry=odometry_health(tracking="acquiring", sending=False)))
+    assert card_text(window, "tracking") == "Acquiring"
+    assert window.status_panel.cards["tracking"].level == "acquiring"
+    assert "Not sending" in window.status_panel.cards["tracking"].detail.text()
+
+
+def test_restart_vio_button_follows_the_engine(window):
+    engine = window.engine
+    assert not window.restart_action.isEnabled()          # not running
+    window.start_action.trigger()
+    assert window.restart_action.isEnabled()
+    window.restart_action.trigger()
+    assert engine.called("restart_vio")
+    # Cooling down: disabled, and the tooltip says why
+    engine.restart_blocked = "restarted moments ago; available again in 18 s"
+    engine.statusUpdated.emit(make_status())
+    assert not window.restart_action.isEnabled()
+    assert "available again in 18 s" in window.restart_action.toolTip()
+    engine.restart_blocked = None
+    engine.statusUpdated.emit(make_status())
+    assert window.restart_action.isEnabled()
+    assert "Not available" not in window.restart_action.toolTip()
+
+
 def test_pose_updates_add_trajectory_points(window):
     for i in range(50):
         window.engine.poseUpdated.emit(lawnmower_pose(i))

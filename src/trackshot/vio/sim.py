@@ -14,7 +14,8 @@ It behaves like OakPoseSource from the engine's point of view:
   number as the OAK's paired mono frames do.
 
 A `script` injects the faults the odometry chain must survive — VIO relocalisation jumps, pose
-dropouts, VIO resets to the origin, and lost tracking — at given simulated times. A dropout stops
+dropouts, VIO resets to the origin, lost tracking, and a frozen VIO (the last pose repeated
+exactly, as RTAB-Map does when it has lost tracking) — at given simulated times. A dropout stops
 poses and the VIO preview (they are one stream on the camera); survey capture carries on.
 
 `realtime=False` runs the same timeline as fast as possible on a simulated clock that starts at a
@@ -79,7 +80,7 @@ SIM_EPOCH_S = 1_767_225_600.0
 FPS_WINDOW_S = 2.0
 _EPS = 1e-9
 
-SCRIPT_EVENTS = ("jump", "dropout", "reset", "lost")
+SCRIPT_EVENTS = ("jump", "dropout", "reset", "lost", "freeze")
 
 
 @dataclass(frozen=True)
@@ -100,7 +101,7 @@ def parse_script(script: Optional[list[dict]]) -> list[ScriptEvent]:
         if "at_s" not in item:
             raise ValueError(f"Sim script event {item!r} has no 'at_s'")
         duration = float(item.get("duration_s", 0.0))
-        if kind in ("dropout", "lost") and duration <= 0:
+        if kind in ("dropout", "lost", "freeze") and duration <= 0:
             raise ValueError(f"Sim script {kind} at {item['at_s']} s needs a positive 'duration_s'")
         offset = tuple(float(v) for v in item.get("offset", (0.0, 0.0, 0.0)))
         if len(offset) != 3:
@@ -336,6 +337,8 @@ class SimPoseSource(PoseSource):
         self._q_off = np.array([1.0, 0.0, 0.0, 0.0])   # reported = off ∘ true (VIO's own world frame)
         self._p_off = np.zeros(3)
         self._pending = list(self.script)             # jump/reset not yet applied
+        self._frozen_pose: Optional[tuple] = None     # the pose a "freeze" repeats
+        self._last_reported: Optional[tuple] = None
         self._last_received = -math.inf
         self._last_preview_t = -math.inf
         self._next_stereo_t = 0.0
@@ -406,8 +409,16 @@ class SimPoseSource(PoseSource):
         self._last_received = received
 
         if not self._in_window(t, "dropout"):
-            sample_args = (t, tuple(float(v) for v in p), tuple(float(v) for v in q),
-                           not self._in_window(t, "lost"))
+            position, quaternion = tuple(float(v) for v in p), tuple(float(v) for v in q)
+            if self._in_window(t, "freeze"):
+                # A lost RTAB-Map keeps sending its last pose, bit for bit
+                if self._frozen_pose is None:
+                    self._frozen_pose = self._last_reported or (position, quaternion)
+                position, quaternion = self._frozen_pose
+            else:
+                self._frozen_pose = None
+            self._last_reported = (position, quaternion)
+            sample_args = (t, position, quaternion, not self._in_window(t, "lost"))
             self._schedule(received, self._deliver_pose, *sample_args)
             if self._preview_vio and t - self._last_preview_t >= 1.0 / PREVIEW_MAX_HZ - _EPS:
                 self._last_preview_t = t

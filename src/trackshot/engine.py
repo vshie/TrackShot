@@ -50,6 +50,8 @@ TELEMETRY_POLL_HZ = 2.0
 SITL_MARKER_PARAM = "SIM_SPEEDUP"
 SOURCE_STOP_TIMEOUT_S = 5.0       # OakPoseSource closes the device itself if this runs out
 WRITER_CLOSE_TIMEOUT_S = 5.0
+# The pilot's Restart VIO reconnects the camera (~15 s); one at a time, and not again within this
+RESTART_VIO_COOLDOWN_S = 20.0
 
 # Settings the engine applies while running. A change to any other field changes the camera
 # pipeline, the odometry or the MAVLink link, so it restarts the run.
@@ -187,6 +189,7 @@ class Engine(QObject):
         # Replaced writers flushing their backlog, and the threads closing them; shutdown waits for them
         self._closing_writers: list[tuple[CaptureWriter, threading.Thread]] = []
         self._recording = False
+        self._last_vio_restart = -math.inf
         self._preview_vio = settings.preview_enabled
         self._preview_color = settings.preview_enabled and settings.color_preview_enabled
 
@@ -241,6 +244,32 @@ class Engine(QObject):
             self._teardown(run)
         if self._state not in (STATE_IDLE, STATE_STOPPED):
             self._set_state(STATE_STOPPED, "Stopped")
+
+    def restart_vio(self) -> bool:
+        """The pilot's "Restart VIO": a fresh camera pipeline and VIO, keeping the settings,
+        recording and MAVLink link setup. For a VIO that stays lost (RTAB-Map already resets
+        itself after a few seconds lost; see oak_pipeline.RTABMAP_RESET_AFTER_S). Refused while
+        one is under way or within RESTART_VIO_COOLDOWN_S of the last. Returns whether it restarted."""
+        blocked = self.restart_vio_blocked()
+        if blocked is not None:
+            logger.info(f"Restart VIO not done: {blocked}")
+            return False
+        self._last_vio_restart = time.monotonic()
+        logger.info("Restarting VIO (pilot request): reconnecting the camera")
+        self.stop()
+        self.start()
+        return True
+
+    def restart_vio_blocked(self) -> Optional[str]:
+        """Why Restart VIO isn't available now, or None if it is."""
+        if self._run is None and not self._start_pending:
+            return "VIO isn't running"
+        if self._state != STATE_RUNNING:
+            return "VIO is still starting"
+        wait = RESTART_VIO_COOLDOWN_S - (time.monotonic() - self._last_vio_restart)
+        if wait > 0:
+            return f"restarted moments ago; available again in {math.ceil(wait)} s"
+        return None
 
     def apply_settings(self, s: Settings) -> None:
         problems = s.validate()

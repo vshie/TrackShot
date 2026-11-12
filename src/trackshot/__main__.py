@@ -197,8 +197,9 @@ def _self_test() -> int:
                 finished.set()
 
         callbacks = SourceCallbacks(on_pose=on_pose, on_state=on_state)
+        # 3 simulated seconds (instant: not real time); the first ~0.5 s is tracking acquisition
         source = SimPoseSource(Settings(source="sim", center_capture_fps=1.0), callbacks,
-                               realtime=False, duration_s=2.0)
+                               realtime=False, duration_s=3.0)
         source.start()
         finished.wait(30.0)
         source.stop()

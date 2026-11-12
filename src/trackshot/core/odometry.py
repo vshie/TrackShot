@@ -46,6 +46,20 @@ STALL_AFTER_S = 1.0
 DEGRADED_JUMPS = 3
 DEGRADED_WINDOW_S = 10.0
 JUMP_LOG_INTERVAL_S = 5.0
+# A frozen VIO: RTAB-Map, once it has lost tracking, keeps reporting its last pose bit for bit, and
+# sent as deltas that is "not moving" at full confidence, which ArduSub fuses (it doesn't gate on
+# confidence) while the vehicle drifts. Real VIO output always carries noise, even with the vehicle
+# still, so an exactly repeated pose is never a measurement. This long a run of repeats (or of
+# invalid poses) is "lost": nothing is sent until tracking is established again.
+FROZEN_AFTER_S = 1.0
+FROZEN_MIN_REPEATS = 5
+# Tracking is "established" (deltas are sent) after this many consecutive distinct, valid poses
+# spanning at least this long: at start-up and after every loss. A VIO started before the camera
+# sees the seabed sends nothing until it has something to track.
+ACQUIRE_POSES = 10
+ACQUIRE_MIN_S = 0.5
+# Lost/regained messages at most this often; the ones in between are counted into the next
+TRACKING_LOG_INTERVAL_S = 10.0
 
 
 @dataclass(frozen=True)
@@ -69,7 +83,10 @@ class OdometryHealth:
     last_pose: Optional[tuple]                   # (x, y, z, qw, qx, qy, qz) after camera rotation
     last_pose_age_s: Optional[float]
     stalled: bool                                # no pose for > 1 s
-    tracking: str                                # "good" | "degraded" | "lost" | "unknown"
+    tracking: str                                # "good" | "degraded" | "acquiring" | "lost" | "unknown"
+    sending: bool = False                        # deltas are going out (tracking established, not lost)
+    lost_for_s: Optional[float] = None           # how long the VIO has been frozen/lost, if it is
+    losses: int = 0                              # times tracking was lost this run
 
 
 # --- Frame math (straight ports of the extension's MavlinkNode methods) ---------------------------
@@ -209,8 +226,15 @@ class OdometryProcessor:
     """Turns successive poses into body-frame deltas, rejecting VIO jumps and bad time spans."""
 
     def __init__(self, camera_angle_deg: float = 0.0, max_speed_mps: float = 3.0,
-                 max_span_s: float = 2.0, clock: Callable[[], float] = time.time):
+                 max_span_s: float = 2.0, clock: Callable[[], float] = time.time,
+                 acquire_poses: Optional[int] = None, acquire_min_s: Optional[float] = None,
+                 frozen_after_s: Optional[float] = None, frozen_min_repeats: Optional[int] = None):
         self.camera_angle_deg = float(camera_angle_deg)
+        # None: the module's constant, read now (so a test can patch the module)
+        self.acquire_poses = ACQUIRE_POSES if acquire_poses is None else int(acquire_poses)
+        self.acquire_min_s = ACQUIRE_MIN_S if acquire_min_s is None else float(acquire_min_s)
+        self.frozen_after_s = FROZEN_AFTER_S if frozen_after_s is None else float(frozen_after_s)
+        self.frozen_min_repeats = FROZEN_MIN_REPEATS if frozen_min_repeats is None else int(frozen_min_repeats)
         self.max_speed_mps = float(max_speed_mps)
         self.max_span_us = int(max_span_s * 1e6)
         self._clock = clock
@@ -243,6 +267,20 @@ class OdometryProcessor:
         self._pose_times: deque[float] = deque()
         self._jump_times: deque[float] = deque()
         self._last_jump_log = -math.inf
+        # Tracking: established (sending), lost (frozen), and the streaks that decide them
+        self._last_raw: Optional[tuple] = None
+        self._bad_since: Optional[float] = None      # start of the current run of repeated/invalid poses
+        self._bad_count = 0
+        self._good_since: Optional[float] = None     # start of the current run of distinct poses
+        self._good_count = 0
+        self._acquired = False
+        self._lost = False
+        self._lost_since: Optional[float] = None
+        self._losses = 0
+        self._ever_acquired = False
+        self._last_tracking_log = -math.inf
+        self._unlogged_losses = 0
+        self._lost_logged = False
 
     # ----------------------------------------------------------------------------------------
     def process(self, sample: PoseSample) -> Optional[DeltaMessage]:
@@ -254,10 +292,19 @@ class OdometryProcessor:
                 # A broken VIO output is a jump like any other: never difference across it
                 self._count_jump(now, "invalid pose")
                 self._restart_chain(None, None, None, None)
+                self._unusable(sample.t_received, "invalid poses")
                 return None
             position, quaternion = apply_camera_rotation(sample.position, sample.quaternion,
                                                          self._camera_rotation)
             self._record_pose(now, sample, position, quaternion)
+            repeated = raw == self._last_raw
+            self._last_raw = raw
+            if repeated:
+                # Not a measurement (see FROZEN_AFTER_S). The chain stays on the last distinct
+                # pose, so a short repeat costs nothing; a long one is a loss.
+                self._unusable(sample.t_received, "pose frozen")
+                return None
+            self._bad_since, self._bad_count = None, 0
 
             # The delta's span must come from capture times: arrival times jitter with host load
             # and the EKF divides the delta by this span. A sample without a capture time falls
@@ -266,6 +313,13 @@ class OdometryProcessor:
                 stamp_us, clock_kind = int(sample.t_capture_us), "capture"
             else:
                 stamp_us, clock_kind = int(sample.t_received * 1e6), "received"
+
+            if not self._acquired:
+                # Not sending yet (start-up, or after a loss): count distinct poses, never
+                # difference across the gap
+                self._restart_chain(position, quaternion, stamp_us, clock_kind)
+                self._acquiring(sample.t_received)
+                return None
 
             if self._prev_us is None or self._prev_clock_kind != clock_kind:
                 self._restart_chain(position, quaternion, stamp_us, clock_kind)
@@ -309,6 +363,48 @@ class OdometryProcessor:
                 angle_delta=angle_delta,
                 confidence=0.0 if sample.tracking is False else 100.0,
             )
+
+    # The streaks are timed by the poses' own arrival times, not the processing clock: the same in
+    # real use, and right for a simulator running faster than real time.
+    def _unusable(self, now: float, reason: str) -> None:
+        """A repeated or invalid pose: progress towards "lost", and away from "established"."""
+        if self._bad_since is None:
+            self._bad_since, self._bad_count = now, 0
+        self._bad_count += 1
+        self._good_since, self._good_count = None, 0
+        if (not self._lost and self._bad_count >= self.frozen_min_repeats
+                and now - self._bad_since >= self.frozen_after_s):
+            self._lost, self._lost_since, self._acquired = True, self._bad_since, False
+            self._losses += 1
+            self._log_lost(now, f"VIO tracking lost ({reason} for {now - self._bad_since:.1f} s): "
+                                "not sending VISION_POSITION_DELTA until it recovers")
+
+    def _acquiring(self, now: float) -> None:
+        if self._good_since is None:
+            self._good_since, self._good_count = now, 0
+        self._good_count += 1
+        if self._good_count >= self.acquire_poses and now - self._good_since >= self.acquire_min_s:
+            self._acquired = True
+            if self._lost and self._lost_logged:
+                # Always paired with its "lost" message, so the log never leaves a loss open
+                logger.info(f"VIO tracking regained after {now - self._lost_since:.1f} s: sending again")
+            elif not self._ever_acquired:
+                logger.info("VIO tracking established: sending VISION_POSITION_DELTA")
+            self._ever_acquired = True
+            self._lost, self._lost_since = False, None
+
+    def _log_lost(self, now: float, message: str) -> None:
+        """At most one "lost" message every TRACKING_LOG_INTERVAL_S: a VIO flickering in and out
+        of tracking must not flood the log. The losses in between are counted into the next one."""
+        self._lost_logged = now - self._last_tracking_log >= TRACKING_LOG_INTERVAL_S
+        if not self._lost_logged:
+            self._unlogged_losses += 1
+            return
+        if self._unlogged_losses:
+            message += f" (lost {self._unlogged_losses} more time(s) since the last message)"
+            self._unlogged_losses = 0
+        self._last_tracking_log = now
+        logger.warning(message)
 
     def _restart_chain(self, position: Optional[Vec3], quaternion: Optional[Quat],
                        stamp_us: Optional[int], clock_kind: Optional[str]) -> None:
@@ -359,10 +455,12 @@ class OdometryProcessor:
                     fps = len(self._pose_times) / window
             age = None if self._last_pose_time is None else now - self._last_pose_time
             stalled = age is not None and age > STALL_AFTER_S
-            if self._poses == 0:
+            if self._poses == 0 and not self._lost:
                 tracking = "unknown"
-            elif stalled or self._last_tracking is False:
+            elif stalled or self._lost or self._last_tracking is False:
                 tracking = "lost"
+            elif not self._acquired:
+                tracking = "acquiring"
             elif len(self._jump_times) >= DEGRADED_JUMPS:
                 tracking = "degraded"
             else:
@@ -381,4 +479,7 @@ class OdometryProcessor:
                 last_pose_age_s=age,
                 stalled=stalled,
                 tracking=tracking,
+                sending=self._acquired and not self._lost and not stalled,
+                lost_for_s=None if self._lost_since is None else now - self._lost_since,
+                losses=self._losses,
             )

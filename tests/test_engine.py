@@ -454,9 +454,9 @@ def test_simulator_never_sends_to_a_real_vehicle(qtbot, make_settings, make_engi
     assert engine.status()["transport"] is None and engine._run.transport is None
     # The SITL check has to time out on the unroutable address before it gives up
     qtbot.waitUntil(lambda: any("not sending VISION_POSITION_DELTA" in t for _, t in rec.logs), timeout=15000)
-    qtbot.wait(300)   # poses flow (and the health timer ticks) without a transport
+    # poses flow (and the health timer ticks) without a transport, once tracking is established
+    qtbot.waitUntil(lambda: engine.status()["odometry"].deltas > 0, timeout=5000)
     assert engine._run.transport is None
-    assert engine.status()["odometry"].deltas > 0
 
 
 @pytest.mark.parametrize("is_sitl", [True, False])
@@ -506,3 +506,65 @@ def test_transport_host(transport, vehicle_ip, udp_url, host, loopback):
     settings = Settings(transport=transport, vehicle_ip=vehicle_ip, udp_url=udp_url or Settings().udp_url)
     assert engine_module.transport_host(settings) == host
     assert engine_module.is_loopback(host) is loopback
+
+
+# --- Frozen VIO and Restart VIO ---------------------------------------------------------------------
+
+FREEZE_AT_S, FREEZE_S = 2.0, 3.0
+
+
+def test_a_frozen_vio_stops_the_deltas_until_it_recovers(qtbot, fake, make_settings, make_engine):
+    """The field failure: RTAB-Map lost, reporting its last pose over and over. Before, that went out
+    as zero deltas at confidence 100; now nothing goes out until the VIO tracks again."""
+    engine = make_engine(make_settings(), sim_factory([{"at_s": FREEZE_AT_S, "event": "freeze",
+                                                         "duration_s": FREEZE_S}]))
+    rec = Recorder(engine)
+    engine.start()
+    qtbot.waitUntil(lambda: engine.state == STATE_RUNNING, timeout=5000)
+    run_until_sim_time(qtbot, engine, FREEZE_AT_S + FREEZE_S + 2.5)
+    health = engine.status()["odometry"]
+    engine.stop()
+    assert engine.wait_idle(8.0)
+
+    deltas = fake.received("VISION_POSITION_DELTA")
+    assert len(deltas) > 40
+    assert not any(m["position_delta"] == [0.0, 0.0, 0.0] for m in deltas), "a frozen pose went out"
+    # One gap covering the freeze and the re-acquisition, nothing else missing
+    times = sorted(m["_time"] for m in deltas)
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    assert FREEZE_S <= max(gaps) < FREEZE_S + 2.0
+    assert sorted(gaps)[-2] < 0.5
+    assert health.tracking == "good" and health.sending and health.losses == 1
+    lost = [s for s in rec.statuses if s["odometry"] is not None and s["odometry"].tracking == "lost"]
+    assert lost and not any(s["odometry"].sending for s in lost)
+    texts = [t for _, t in rec.logs]
+    assert any("VIO tracking lost (pose frozen" in t for t in texts)
+    assert any("VIO tracking regained" in t for t in texts)
+    # Cockpit saw the loss too
+    track = [m["value"] for m in fake.received("NAMED_VALUE_FLOAT") if "".join(m["name"]).rstrip("\x00") == "TS_TRACK"]
+    assert 0.0 in track and 1.0 in track
+
+
+def test_restart_vio_reconnects_once_and_then_cools_down(qtbot, make_settings, make_engine, monkeypatch):
+    engine = make_engine(make_settings())
+    rec = Recorder(engine)
+    assert engine.restart_vio_blocked() == "VIO isn't running"
+    assert engine.restart_vio() is False
+    engine.start()
+    qtbot.waitUntil(lambda: engine.state == STATE_RUNNING, timeout=5000)
+    assert engine.restart_vio_blocked() is None
+    first_run = engine._run
+
+    assert engine.restart_vio() is True
+    assert engine._run is not first_run
+    # A second press straight away does nothing: one restart at a time, then the cooldown
+    assert engine.restart_vio() is False
+    qtbot.waitUntil(lambda: engine.state == STATE_RUNNING, timeout=8000)
+    blocked = engine.restart_vio_blocked()
+    assert blocked is not None and "available again in" in blocked
+    assert engine.restart_vio() is False
+    assert sum("Restarting VIO (pilot request)" in t for _, t in rec.logs) == 1
+
+    # After the cooldown it is available again
+    monkeypatch.setattr(engine_module, "RESTART_VIO_COOLDOWN_S", 0.0)
+    assert engine.restart_vio_blocked() is None

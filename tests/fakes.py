@@ -154,6 +154,7 @@ class FakeEngine(QObject):
         self.params = FakeAutopilotParams()
         self.calls: list[tuple] = []
         self.applied: list[Settings] = []
+        self.restart_blocked: Optional[str] = None   # what restart_vio_blocked() reports while running
 
     @property
     def settings(self) -> Settings:
@@ -175,6 +176,19 @@ class FakeEngine(QObject):
     def stop(self) -> None:
         self.calls.append(("stop",))
         self._set_state(STATE_STOPPED, "Stopped")
+
+    def restart_vio(self) -> bool:
+        self.calls.append(("restart_vio",))
+        if self.restart_blocked is not None:
+            return False
+        self.stop()
+        self.start()
+        return True
+
+    def restart_vio_blocked(self) -> Optional[str]:
+        if self._state != STATE_RUNNING:
+            return "VIO isn't running"
+        return self.restart_blocked
 
     def apply_settings(self, s: Settings) -> None:
         self.calls.append(("apply_settings", s))
@@ -199,7 +213,7 @@ class FakeEngine(QObject):
 def odometry_health(**overrides):
     fields = dict(fps=9.8, latency_ms=64.0, suggested_viso_delay_ms=60, poses=1200, deltas=1195, jumps=1,
                   rejected_spans=2, last_pose=(3.2, -1.1, -0.4, 1.0, 0.0, 0.0, 0.0), last_pose_age_s=0.08,
-                  stalled=False, tracking="good")
+                  stalled=False, tracking="good", sending=True)
     fields.update(overrides)
     try:
         from trackshot.core.odometry import OdometryHealth

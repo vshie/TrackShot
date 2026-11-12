@@ -123,8 +123,19 @@ class StatusPanel(QWidget):
 
         tracking = value(odo, "tracking", "unknown") or "unknown"
         age = value(odo, "last_pose_age_s")
-        self.cards["tracking"].set(tracking.capitalize(), tracking if tracking != "unknown" else "neutral",
-                                   f"Last pose {fmt(age, '.1f', 's')} ago" if age is not None else "")
+        lost_for = value(odo, "lost_for_s")
+        if tracking == "lost" and lost_for is not None:
+            text = f"Lost {lost_for:.0f} s"
+            detail = "Not sending. Point the camera at the seabed; RTAB-Map retries every few seconds, or use Restart VIO"
+        elif tracking == "acquiring":
+            text, detail = "Acquiring", "Not sending until the VIO tracks steadily"
+        else:
+            text = tracking.capitalize()
+            detail = f"Last pose {fmt(age, '.1f', 's')} ago" if age is not None else ""
+        losses = value(odo, "losses") or 0
+        if losses:
+            detail += f" · lost {losses}× this run"
+        self.cards["tracking"].set(text, tracking if tracking != "unknown" else "neutral", detail)
 
         jumps = value(odo, "jumps")
         rejected = value(odo, "rejected_spans")

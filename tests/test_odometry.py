@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import trackshot.core.odometry as odometry_module
 from trackshot.core.odometry import (
     OdometryProcessor,
     HOST_TO_AUTOPILOT_MS,
@@ -18,6 +19,14 @@ from trackshot.core.odometry import (
     viso_delay_estimate_ms,
 )
 from trackshot.vio.source import PoseSample
+
+@pytest.fixture(autouse=True)
+def send_from_the_first_delta(monkeypatch):
+    """The golden tests check the math from the second pose on; tracking acquisition (start-up
+    gating) has its own tests in test_tracking.py."""
+    monkeypatch.setattr(odometry_module, "ACQUIRE_POSES", 0)
+    monkeypatch.setattr(odometry_module, "ACQUIRE_MIN_S", 0.0)
+
 
 IDENTITY = (1.0, 0.0, 0.0, 0.0)
 C45 = math.cos(math.radians(45))
@@ -260,7 +269,10 @@ def test_snap_to_origin_is_rejected():
 def test_starting_at_origin_is_not_a_snap():
     proc = OdometryProcessor()
     proc.process(sample(T0_US, (0.0, 0.0, 0.0)))
-    assert proc.process(sample(T0_US + 100_000, (0.0, 0.0, 0.0))) is not None
+    # An exact repeat isn't a measurement (see test_tracking.py), so it is withheld, but not as a jump
+    assert proc.process(sample(T0_US + 100_000, (0.0, 0.0, 0.0))) is None
+    d = proc.process(sample(T0_US + 200_000, (0.01, 0.0, 0.0)))
+    assert d is not None and d.position_delta == pytest.approx((0.01, 0.0, 0.0))
     assert proc.health().jumps == 0
 
 
@@ -271,8 +283,8 @@ def test_invalid_pose_is_a_jump():
     assert proc.process(sample(T0_US + 200_000, (0.0, 0.0, 0.0), (0, 0, 0, 0))) is None
     assert proc.health().jumps == 2
     # The chain restarts: the next good pose only starts it again
-    assert proc.process(sample(T0_US + 300_000, (0.0, 0.0, 0.0))) is None
-    assert proc.process(sample(T0_US + 400_000, (0.0, 0.0, 0.0))) is not None
+    assert proc.process(sample(T0_US + 300_000, (0.001, 0.0, 0.0))) is None
+    assert proc.process(sample(T0_US + 400_000, (0.002, 0.0, 0.0))) is not None
 
 
 @pytest.mark.parametrize("dt_us", [2_000_001, 2_500_000, -100_000, 999, 0])
@@ -328,14 +340,14 @@ def test_latency_ema_and_suggestion():
     proc = OdometryProcessor()
     proc.process(sample(T0_US, (0, 0, 0), latency_s=0.050))
     assert proc.health().latency_ms == pytest.approx(50.0)
-    proc.process(sample(T0_US + 100_000, (0, 0, 0), latency_s=0.200))
+    proc.process(sample(T0_US + 100_000, (0.001, 0, 0), latency_s=0.200))
     # 0.9 × 50 + 0.1 × 200 = 65 ms
     h = proc.health()
     assert h.latency_ms == pytest.approx(65.0)
     # 65 ms latency + half the 100 ms span + 5 ms transit = 120
     assert h.suggested_viso_delay_ms == 120
     # Nonsense latencies (≥ 5 s or negative) are ignored
-    proc.process(sample(T0_US + 200_000, (0, 0, 0), latency_s=7.0))
+    proc.process(sample(T0_US + 200_000, (0.002, 0, 0), latency_s=7.0))
     proc.process(sample(T0_US + 300_000, (0, 0, 0), latency_s=-0.5))
     assert proc.health().latency_ms == pytest.approx(65.0)
 
@@ -394,8 +406,8 @@ def test_health_fps_stall_and_tracking_states():
     assert (h.tracking, h.poses, h.fps, h.stalled, h.last_pose) == ("unknown", 0, 0.0, False, None)
 
     t_us = T0_US
-    for _ in range(30):   # 3 s at 10 Hz
-        proc.process(sample(t_us, (0, 0, 0)))
+    for i in range(30):   # 3 s at 10 Hz, holding station (real VIO output is never bit-identical)
+        proc.process(sample(t_us, (i * 1e-4, 0, 0)))
         clock.t += 0.1
         t_us += 100_000
     h = proc.health()
@@ -418,7 +430,7 @@ def test_health_fps_stall_and_tracking_states():
 
     # The jumps age out of the 10 s window
     clock.t += 10.0
-    proc.process(sample(t_us + 12_000_000, (0, 0, 0)))
+    proc.process(sample(t_us + 12_000_000, (0.5, 0, 0)))
     assert proc.health().tracking == "good"
 
     proc.reset()
