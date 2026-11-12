@@ -2,6 +2,7 @@
 
 import json
 import socket
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -13,6 +14,11 @@ from pymavlink import mavutil
 from pymavlink.dialects.v20 import ardupilotmega as mavlink2
 
 from trackshot.testing.fake_autopilot import FakeAutopilot
+
+
+# pymavlink binds a udpout socket to 0.0.0.0:<destination port> on Windows, which collides with
+# the test's vehicle socket on localhost (and, for real, with a GCS on the same PC using that port)
+udp_loopback = pytest.mark.skipif(sys.platform == "win32", reason="pymavlink udpout binds the destination port on Windows")
 
 
 def get(fake, name, system_id=1, component_id=1):
@@ -198,6 +204,7 @@ def test_udp_records_messages():
     assert named["name"] == "TS_FPS"
 
 
+@udp_loopback
 def test_udp_heartbeats_reach_a_pymavlink_client():
     with FakeAutopilot() as fake:
         conn = mavutil.mavlink_connection(fake.udp_url, source_system=1, source_component=197)

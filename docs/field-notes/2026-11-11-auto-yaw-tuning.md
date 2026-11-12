@@ -1,6 +1,6 @@
 # AUTO yaw oscillation fix: field test, 2026-11-11
 
-Vehicle: ArduSub 4.7.2 at 192.168.2.2, down-looking OAK, TrackShot RTAB-Map VIO (320×200, set to 20 fps), no GPS underwater.
+Vehicle: ArduSub 4.7.2 at 192.168.2.2. Navigation in these logs: **DVL** odometry sent as VISION_POSITION_DELTA (~5 Hz), no GPS underwater. (TrackShot's own log shows it was not running VIO during logs 17 and 19; its last VIO run ended at 14:07.)
 Mission: lawnmower survey, ~9.7 m legs, ~1.9 m lane spacing, DO_CHANGE_SPEED 0.4 m/s, depths 4–8 m.
 Logs: `00000017.BIN` (before), `00000019.BIN` (after; ~48 min, seven AUTO runs).
 
@@ -32,7 +32,7 @@ Everything else was unchanged (diffed from the logs' parameter dumps).
 | Heading turns > 30° per run | 18 | 0 (one exception, see below) |
 | Horizontal position error, median / p95 | 0.11 / 0.20 m | 0.06–0.08 / 0.12–0.27 m |
 | Speed along legs (commanded 0.4 m/s) | ~0.27 m/s | ~0.26 m/s |
-| VIO into ArduSub | 4.8 Hz, confidence ~81 | 4.3–6.2 Hz, confidence 83–96 |
+| DVL odometry into ArduSub | 4.8 Hz, confidence ~81 | 4.3–6.2 Hz, confidence 83–96 |
 
 The oscillation is gone, and position holding is the same or slightly better. `WP_YAW_BEHAVIOR = 0` also suits photogrammetry:
 every image keeps the same orientation. No further yaw tuning is needed.
@@ -51,11 +51,13 @@ every image keeps the same orientation. No further yaw tuning is needed.
 3. **The pilot-input failsafe disarmed the vehicle in AUTO (3011.5 s, "Lost manual control").** `FS_PILOT_INPUT` = 2 with a 3 s
    timeout, so an AUTO survey depends on Cockpit sending joystick input continuously. This was probably the end of the session; worth
    knowing if a topside hiccup should not end a survey.
-4. **`VISO_DELAY_MS` is still 10.** Set it from TrackShot's Autopilot panel suggestion after ~30 s of VIO.
-5. **VIO reaches ArduSub at ~5 Hz** (delta span 0.19 s), although TrackShot is set to 20 fps. If TrackShot's Status panel also shows
-   ~5 poses/s, 10 fps would give the same tracking for half the tether bandwidth (15 instead of 31 Mbit/s).
+4. **`VISO_DELAY_MS` is 10.** Set it to suit whichever odometry source is sending: the DVL's latency
+   (DVL navigation), or TrackShot's suggested value (TrackShot VIO).
+5. **Odometry reaches ArduSub at ~5 Hz** (delta span 0.19 s), the DVL's update rate. (An earlier version of this note
+   attributed this to TrackShot; TrackShot was not running.) `VISO_ORIENT` is 0, matching the DVL's mounting: its angle
+   deltas line up with the vehicle's gyro axes.
 6. Minor:
-   - VIO dropouts of 1–2.6 s happened five times in AUTO, consistent with the known mavlink2rest stalls; there was no visible effect.
+   - Odometry dropouts of 1–2.6 s happened five times in AUTO; there was no visible effect.
    - Selecting AUTO while disarmed (770.8 s) marked all waypoints reached at once. This was harmless; the mission restarted
      normally at 809 s.
    - The vehicle travels at ~65% of the commanded speed, as it did before the change. The thrusters are not saturated. This is

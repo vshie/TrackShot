@@ -5,6 +5,7 @@ import asyncio
 import json
 import socket
 import threading
+import sys
 import time
 
 import pytest
@@ -25,6 +26,11 @@ from trackshot.mavlink.transport import (
 
 DELTA = DeltaMessage(time_usec=1_700_000_000_000_000, time_delta_usec=100_000,
                      position_delta=(0.1, -0.2, 0.3), angle_delta=(0.0, 0.0, -0.1), confidence=100.0)
+
+
+# pymavlink binds a udpout socket to 0.0.0.0:<destination port> on Windows, which collides with
+# the test's vehicle socket on localhost (and, for real, with a GCS on the same PC using that port)
+udp_loopback = pytest.mark.skipif(sys.platform == "win32", reason="pymavlink udpout binds the destination port on Windows")
 
 
 def wait_until(condition, timeout=3.0):
@@ -218,6 +224,8 @@ def test_stale_messages_are_dropped_while_disconnected(monkeypatch, stoppable):
     for _ in range(3):
         t.send(*vision_position_delta(DELTA))
     assert wait_until(lambda: t.stats().dropped == 3, timeout=2)
+    # the refused connect is reported once it fails (about 2 s on Windows, which retries it)
+    assert wait_until(lambda: t.stats().errors >= 1, timeout=5)
     s = t.stats()
     assert not s.connected and s.sent == 0 and s.errors >= 1 and s.last_error
 
@@ -280,6 +288,7 @@ def test_udp_sends_mavlink2_from_1_197(vehicle_socket, stoppable):
     assert t.stats().kind == "udp"
 
 
+@udp_loopback
 def test_udp_tracks_autopilot_heartbeat(vehicle_socket, stoppable):
     port = vehicle_socket.getsockname()[1]
     t = stoppable(UdpTransport(f"udpout:127.0.0.1:{port}", 1, 197))

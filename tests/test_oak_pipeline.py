@@ -28,6 +28,8 @@ from trackshot.vio.source import (
 )
 
 HW_TESTS = os.environ.get("TRACKSHOT_HW_TESTS") == "1"
+# depthai's Windows wheel has RTAB-Map but no Basalt (see trackshot.capabilities)
+needs_basalt = pytest.mark.skipif(not hasattr(dai.node, "BasaltVIO"), reason="this depthai build has no BasaltVIO")
 has_camera = HW_TESTS and bool(capabilities.list_cameras())
 needs_camera = pytest.mark.skipif(not has_camera,
                                   reason="camera tests are opt-in: TRACKSHOT_HW_TESTS=1 with an OAK on the network")
@@ -130,11 +132,13 @@ def test_preview_throttle_restarts_after_a_pause():
 ENUM_FIELDS = {"optical_flow_matching_guess_type", "vio_linearization_type", "vio_kf_marg_criteria"}
 
 
+@needs_basalt
 def test_basalt_defaults_cover_every_settable_field():
     fields = {f for f in dir(dai.VioConfig()) if not f.startswith("_")}
     assert set(op.DEPTHAI_BASALT_DEFAULTS) == fields - ENUM_FIELDS
 
 
+@needs_basalt
 def test_basalt_config_maps_settings_onto_depthai_defaults():
     s = Settings(basalt_grid_size=64, basalt_flow_iterations=4, basalt_flow_levels=2, basalt_max_states=2,
                  basalt_max_kfs=6, basalt_vio_iterations=5, basalt_skip_frames=2)
@@ -155,6 +159,7 @@ def test_basalt_config_maps_settings_onto_depthai_defaults():
     assert cfg.mapper_lm_lambda_max == pytest.approx(1e3)
 
 
+@needs_basalt
 def test_basalt_node_accepts_the_config():
     pipeline = dai.Pipeline(False)            # host-only: the VIO nodes can be built without a camera
     odom = pipeline.create(dai.node.BasaltVIO)
@@ -592,6 +597,7 @@ def test_colour_preview_and_capture_frames():
     assert by_stream["left"].lens is None
 
 
+@needs_basalt
 def test_build_wires_backend_preview_and_capture(monkeypatch):
     """Pipeline construction with the device nodes mocked (they need a camera to exist)."""
     rec = Recorder()
@@ -714,6 +720,7 @@ def test_a_basalt_pipeline_that_never_got_a_frame_is_parked_not_stopped(monkeypa
     assert any("Basalt never received" in m for _, m in rec.logs)
 
 
+@needs_basalt
 def test_parking_avoids_the_depthai_crash_end_to_end(tmp_path):
     """The real depthai: a started Basalt pipeline with no frames crashes (SIGSEGV) on stop() or
     when destroyed. Released through OakPoseSource and left with os._exit, the process exits 0."""

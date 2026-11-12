@@ -1,6 +1,7 @@
 """AutopilotParams against the fake mavlink2rest (both JSON flavours)."""
 
 import socket
+import sys
 import time
 
 import pytest
@@ -91,7 +92,8 @@ def test_unreachable_is_reported_quickly():
     started = time.monotonic()
     with pytest.raises(AutopilotUnreachable):
         autopilot.check()
-    assert time.monotonic() - started < 1.0
+    # Windows retries a refused TCP connect for about 2 s before failing it
+    assert time.monotonic() - started < (3.0 if sys.platform == "win32" else 1.0)
 
 
 def test_no_heartbeat():
