@@ -66,7 +66,7 @@ def card_text(win: MainWindow, key: str) -> str:
 
 def test_window_builds(window):
     assert window.windowTitle() == "TrackShot"
-    assert set(window.docks) == {"settings", "status", "bandwidth", "autopilot", "capture", "log"}
+    assert set(window.docks) == {"settings", "status", "bandwidth", "autopilot", "capture", "log", "depth", "widget"}
     assert window.start_action.isEnabled() and not window.stop_action.isEnabled()
     assert window.source_combo.currentData() == "oak"
     assert window.preview_action.isChecked()
@@ -596,7 +596,7 @@ def test_a_failed_recheck_after_a_revert_keeps_its_outcome(window, qtbot, monkey
     params = window.engine.params
     checked_and_applied(panel, qtbot, monkeypatch)
     panel.reboot_pending = []
-    monkeypatch.setattr(params, "check", lambda suggested=None: (_ for _ in ()).throw(TimeoutError("timed out")))
+    monkeypatch.setattr(params, "check", lambda suggested=None, **_: (_ for _ in ()).throw(TimeoutError("timed out")))
     monkeypatch.setattr(panel, "confirm_revert", lambda rows: True)
     panel.revert_button.click()
     qtbot.waitUntil(lambda: params.revert_calls == 1 and not panel.busy, timeout=3000)
@@ -854,3 +854,37 @@ def test_map_goes_north_up_with_the_compass_heading_once_the_autopilot_attitude_
     assert traj.arrow.pos().x() == pytest.approx(-3.0) and traj.arrow.pos().y() == pytest.approx(10.0)
     assert "heading 90° (compass)" in traj.info.text()
     assert traj.plot.getAxis("left").labelText == "north"
+
+
+def depth_status(altitude=2.48):
+    status = make_status()
+    status["telemetry"] = dict(status["telemetry"] or {}, mode="AUTO", armed=True, depth_m=6.2, altitude_m=2.51)
+    status["altitude"] = {"distance_m": altitude, "quality": 96, "age_s": 0.05, "sending": True}
+    return status
+
+
+def test_depth_panel_readouts(window):
+    window.engine.statusUpdated.emit(depth_status())
+    d = window.depth
+    assert d.depth.text() == "6.20 m"
+    assert d.altitude.text() == "2.48 m" and "quality 96 %" in d.altitude_detail.text()
+    assert "sent as the rangefinder" in d.altitude_detail.text()
+    assert d.rangefinder.text() == "2.51 m"
+    assert not hasattr(d, "up")                       # no height buttons: AUTO's terrain waypoints set it
+
+
+def test_no_stereo_altitude_says_why(window):
+    status = depth_status()
+    status["altitude"] = None
+    window.engine.statusUpdated.emit(status)
+    assert window.depth.altitude.text() == "—"
+    assert "RTAB-Map" in window.depth.altitude_detail.text()
+
+
+def test_autopilot_check_includes_the_rangefinder_rows_only_when_sending_altitude(make_window, qtbot):
+    for send, expected in ((False, False), (True, True)):
+        win = make_window(send_distance_sensor=send)
+        params = win.engine.params
+        win.autopilot.check()
+        qtbot.waitUntil(lambda: bool(params.rangefinder_calls), timeout=5000)
+        assert params.rangefinder_calls[-1] is expected

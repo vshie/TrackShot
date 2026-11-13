@@ -65,6 +65,14 @@ class Settings:
     # --- MAVLink ----------------------------------------------------------------------------
     transport: str = "mavlink2rest"         # "mavlink2rest" (WebSocket via BlueOS) or "udp" (pymavlink)
     odometry_output: str = "position_speed"  # see ODOMETRY_OUTPUTS
+    # Altitude above the seabed from the stereo depth (RTAB-Map, camera looking down) as a
+    # downward DISTANCE_SENSOR, for SURFTRAK. Off by default: a DVL feeding the same rangefinder
+    # (RNGFND1_TYPE 10, orientation 25) would fight it.
+    send_distance_sensor: bool = False
+    # --- Cockpit widget (trackshot.web.server) -------------------------------------------------
+    widget_enabled: bool = True
+    widget_port: int = 5425
+    widget_lan: bool = True                 # reachable from the network (Cockpit on another computer)
     vehicle_ip: str = "192.168.2.2"
     udp_url: str = "udpout:192.168.2.2:14550"
     source_system: int = 1                  # same system as the autopilot, like an onboard companion
@@ -127,6 +135,8 @@ class Settings:
             lower = self.width - self.width % RTABMAP_WIDTH_MULTIPLE
             problems.append(f"RTAB-Map needs a VIO width that is a multiple of {RTABMAP_WIDTH_MULTIPLE} "
                             f"(stereo depth on the OAK): use {lower} or {lower + RTABMAP_WIDTH_MULTIPLE}")
+        if not 1024 <= self.widget_port <= 65535:
+            problems.append("Cockpit widget port must be 1024–65535")
         if not -90.0 <= self.camera_angle_deg <= 90.0:
             problems.append("Camera angle must be between -90° and 90°")
         if self.center_capture_fps < 0 or self.stereo_capture_fps < 0:

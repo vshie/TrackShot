@@ -39,8 +39,10 @@ COLUMNS = (
     "sent",
     # the NED track (north, east), its velocity, and the heading used to rotate into it
     "ned_n", "ned_e", "ned_vn", "ned_ve", "ned_heading_deg",
-    # the autopilot's own attitude and depth (telemetry, ~2 Hz)
-    "ap_heading_deg", "ap_roll_deg", "ap_pitch_deg", "ap_depth_m",
+    # the autopilot's own attitude and depth (telemetry, ~2 Hz), and its rangefinder reading
+    "ap_heading_deg", "ap_roll_deg", "ap_pitch_deg", "ap_depth_m", "ap_rangefinder_m",
+    # TrackShot's stereo altitude (the latest, ~10 Hz) and its quality
+    "alt_m", "alt_quality",
 )
 
 

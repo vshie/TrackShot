@@ -195,8 +195,8 @@ def _open_backup(params):
 
 # --- Worker tasks (QThreadPool threads) ----------------------------------------------------------
 
-def check_task(params, suggested: Optional[int]) -> dict:
-    rows = params.check(suggested)
+def check_task(params, suggested: Optional[int], include_rangefinder: bool = False) -> dict:
+    rows = params.check(suggested, include_rangefinder=include_rangefinder)
     from trackshot.autopilot.backup import BackupError
     try:
         snapshot = backup_snapshot(_open_backup(params))
@@ -409,9 +409,11 @@ class AutopilotPanel(QWidget):
             return
         params.cancel = self._cancel
         suggested = self._suggested
+        # The rangefinder rows only when TrackShot is the rangefinder (not with a DVL)
+        rangefinder = bool(getattr(self._engine.settings, "send_distance_sensor", False))
         self._set_busy(True, "Reading parameters from the autopilot…")
         generation = self._generation
-        run_in_pool(self._pool, lambda: check_task(params, suggested),
+        run_in_pool(self._pool, lambda: check_task(params, suggested, rangefinder),
                     lambda r: self._on_checked(r, generation), lambda e: self._on_failed(e, generation))
 
     def apply_recommended(self) -> None:

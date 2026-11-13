@@ -275,6 +275,17 @@ def _self_test() -> int:
 
     check("GUI modules", gui_modules)
     check("app icon", lambda: f"{resource_path('icon.png').stat().st_size} bytes")
+
+    def widget_page():
+        from trackshot.web.server import preview_jpeg
+        page = resource_path("widget.html").read_bytes()
+        if b"preview.jpg" not in page:
+            raise RuntimeError("widget.html is not the Cockpit widget page")
+        import numpy as np
+        jpeg = preview_jpeg(np.zeros((20, 32), np.uint8), np.array([[10.0, 10.0]]))
+        return f"{len(page)} bytes, preview JPEG {len(jpeg)} bytes"
+
+    check("Cockpit widget", widget_page)
     print("self-test passed" if ok else "self-test FAILED")
     return 0 if ok else 1
 

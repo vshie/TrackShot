@@ -85,7 +85,8 @@ hiddenimports = dai_hidden + [
     "trackshot.capture.meta",
 ]
 
-datas = dai_datas + [(str(SRC / "trackshot" / "resources" / "icon.png"), "trackshot/resources")]
+datas = dai_datas + [(str(SRC / "trackshot" / "resources" / name), "trackshot/resources")
+                     for name in ("icon.png", "widget.html")]
 try:
     datas += copy_metadata("trackshot")       # so the app can report its version
 except Exception:  # noqa: BLE001 - not installed as a distribution: the version shows "dev"

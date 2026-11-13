@@ -88,8 +88,8 @@ class SettingsPanel(QWidget):
         form_host = QWidget()
         form_layout = QVBoxLayout(form_host)
         form_layout.setContentsMargins(6, 6, 6, 6)
-        for group in (self._source_group(), self._vio_group(), self._mavlink_group(), self._preview_group(),
-                      self._capture_group(), self._bandwidth_group()):
+        for group in (self._source_group(), self._vio_group(), self._mavlink_group(), self._widget_group(),
+                      self._preview_group(), self._capture_group(), self._bandwidth_group()):
             form_layout.addWidget(group)
         form_layout.addStretch(1)
         scroll = QScrollArea()
@@ -344,6 +344,10 @@ class SettingsPanel(QWidget):
             "Position delta: VISION_POSITION_DELTA, which ArduSub fuses on all three axes, so the camera's "
             "vertical motion also feeds the depth estimate.")
         form.addRow("Send VIO as", self.odometry_output)
+        form.addRow(self._check("send_distance_sensor", "Send altitude as a rangefinder (DISTANCE_SENSOR)",
+                                "TrackShot's stereo altitude (RTAB-Map, camera angle 90°) as a downward "
+                                "rangefinder for AUTO terrain following and SURFTRAK: RNGFND1_TYPE 10, "
+                                "RNGFND1_ORIENT 25 on the autopilot (Autopilot panel → Check). Turn it off while a DVL feeds the same rangefinder."))
         form.addRow("Vehicle IP", self._line(
             "vehicle_ip", "192.168.2.2",
             "The ROV's BlueOS. Parameters and telemetry for the images come from here."))
@@ -351,6 +355,19 @@ class SettingsPanel(QWidget):
         form.addRow("UDP URL", self.udp_url)
         form.addRow(self._check("send_health", "Send health values for Cockpit",
                                 "TS_FPS, TS_LAT_MS, TS_JUMPS and TS_TRACK as NAMED_VALUE_FLOAT"))
+        return group
+
+    def _widget_group(self) -> QGroupBox:
+        group = QGroupBox("Cockpit widget")
+        form = self._form(group)
+        form.addRow(self._check("widget_enabled", "Serve the Cockpit widget",
+                                "Lets Cockpit's IFrame widget show and control TrackShot: the VIO image, "
+                                "tracking lock, depth, altitude, rangefinder, start/stop and record. "
+                                "The Cockpit widget panel has the URL and the steps."))
+        form.addRow("Port", self._spin("widget_port", 1024, 65535))
+        form.addRow(self._check("widget_lan", "Reachable from the network",
+                                "Needed when Cockpit runs on another computer. Anyone on the network can "
+                                "then start and stop tracking and recording."))
         return group
 
     def _preview_group(self) -> QGroupBox:

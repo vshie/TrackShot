@@ -26,7 +26,8 @@ hardware id), and publishes HEARTBEAT (1 Hz), ATTITUDE,
 GLOBAL_POSITION_INT, VFR_HUD, SCALED_PRESSURE2, DISTANCE_SENSOR and MISSION_CURRENT (5 Hz) from
 `vehicle`. `clock_skew_s` offsets its `last_update` stamps, like a Pi whose clock is wrong.
 With `hide_viso_until_reboot`, VISO_* parameters other than VISO_TYPE are hidden (unreadable and
-unwritable) unless VISO_TYPE was 1 at the last `reboot()`, as ArduPilot does.
+unwritable) unless VISO_TYPE was 1 at the last `reboot()`, and RNGFND1_* ones other than
+RNGFND1_TYPE unless RNGFND1_TYPE was set, as ArduPilot does.
 
 A UDP socket decodes MAVLink with pymavlink and sends a HEARTBEAT to the last peer at 1 Hz, so a
 pymavlink `udpout:` client sees the autopilot.
@@ -83,12 +84,21 @@ DEFAULT_PARAMS = {
     "EK3_SRC_OPTIONS": 1.0,
     "VISO_DELAY_MS": 10.0,
     "VISO_ORIENT": 0.0,
+    # ArduPilot's defaults with no rangefinder fitted
+    "RNGFND1_TYPE": 0.0,
+    "RNGFND1_ORIENT": 25.0,
+    "RNGFND1_MIN": 0.2,
+    "RNGFND1_MAX": 7.0,
+    "WP_RFND_USE": 1.0,
+    "FS_TERRAIN_ENAB": 0.0,       # disarm
     "SURFACE_DEPTH": -10.0,
 }
 DEFAULT_PARAM_TYPES = {
     "EK3_SRC_OPTIONS": "MAV_PARAM_TYPE_INT16",
     "VISO_DELAY_MS": "MAV_PARAM_TYPE_INT16",
     "SURFACE_DEPTH": "MAV_PARAM_TYPE_REAL32",
+    "RNGFND1_MIN": "MAV_PARAM_TYPE_REAL32",
+    "RNGFND1_MAX": "MAV_PARAM_TYPE_REAL32",
 }
 DEFAULT_PARAM_TYPE = "MAV_PARAM_TYPE_INT8"
 INTEGER_PARAM_TYPES = {"MAV_PARAM_TYPE_INT8", "MAV_PARAM_TYPE_UINT8", "MAV_PARAM_TYPE_INT16",
@@ -222,6 +232,7 @@ class FakeAutopilot:
         self.autopilot_version_cached = autopilot_version_cached
         self.hide_viso_until_reboot = hide_viso_until_reboot
         self._viso_enabled_at_boot = self.params.get("VISO_TYPE", 0.0) >= 1
+        self._rangefinder_at_boot = self.params.get("RNGFND1_TYPE", 0.0) != 0
         self.reboots = 0
 
         self._lock = threading.RLock()
@@ -320,6 +331,7 @@ class FakeAutopilot:
         VISO_* group exists) are re-read."""
         with self._lock:
             self._viso_enabled_at_boot = self.params.get("VISO_TYPE", 0.0) >= 1
+            self._rangefinder_at_boot = self.params.get("RNGFND1_TYPE", 0.0) != 0
             self._boot = time.monotonic()
             self.reboots += 1
 
@@ -329,6 +341,9 @@ class FakeAutopilot:
             return False
         if (self.hide_viso_until_reboot and name.startswith("VISO_") and name != "VISO_TYPE"
                 and not self._viso_enabled_at_boot):
+            return False
+        if (self.hide_viso_until_reboot and name.startswith("RNGFND1_") and name != "RNGFND1_TYPE"
+                and not self._rangefinder_at_boot):
             return False
         return True
 

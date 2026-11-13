@@ -44,6 +44,7 @@ from trackshot.vio.source import (
     STATE_STOPPED,
     CapturedJpeg,
     PoseSample,
+    RangeSample,
     PoseSource,
     PreviewFrame,
     SourceCallbacks,
@@ -58,6 +59,10 @@ DEPTH_AMPLITUDE_M = 0.2
 DEPTH_PERIOD_S = 20.0
 
 # --- Sensor imperfections -------------------------------------------------------------------
+# A flat seabed this far below where the vehicle starts: the simulated altitude (DISTANCE_SENSOR)
+SEABED_BELOW_START_M = 2.5
+ALTITUDE_NOISE_M = 0.02
+ALTITUDE_HZ = 10.0
 POSITION_NOISE_M = 0.001     # 1 mm σ: what a well-tracking VIO jitters by frame to frame
 ATTITUDE_NOISE_RAD = 0.0005
 LATENCY_MEAN_S = 0.060       # capture→host, what an OAK over the tether shows with host-side VIO
@@ -324,9 +329,11 @@ class SimPoseSource(PoseSource):
         """Per-run state. Independent RNG streams per purpose, so toggling the preview or
         capture never changes the pose sequence for a seed."""
         s = self.settings
-        pose_ss, latency_ss, texture_ss, feature_ss = np.random.SeedSequence(self.seed).spawn(4)
+        # A fifth child stream (altitude) leaves the first four, and so every existing sequence, unchanged
+        pose_ss, latency_ss, texture_ss, feature_ss, altitude_ss = np.random.SeedSequence(self.seed).spawn(5)
         self._pose_rng = np.random.default_rng(pose_ss)
         self._latency_rng = np.random.default_rng(latency_ss)
+        self._altitude_rng = np.random.default_rng(altitude_ss)
         self._texture_seeds = dict(zip(("vio", "color", "center", "mono"), texture_ss.spawn(4)))
         self._scenes: dict[str, _Scene] = {}
         self._features = np.random.default_rng(feature_ss).uniform(
@@ -342,6 +349,7 @@ class SimPoseSource(PoseSource):
         self._last_received = -math.inf
         self._last_preview_t = -math.inf
         self._next_stereo_t = 0.0
+        self._next_altitude_t = 0.0
         self._center_seq = 0
 
         self._frame_period = 1.0 / s.fps
@@ -424,6 +432,11 @@ class SimPoseSource(PoseSource):
                 self._last_preview_t = t
                 self._schedule(received, self._deliver_vio_preview, true_p.copy(), sample_args[3])
 
+        if t >= self._next_altitude_t - _EPS:
+            self._next_altitude_t = t + 1.0 / ALTITUDE_HZ
+            altitude = SEABED_BELOW_START_M + float(true_p[2]) + float(self._altitude_rng.normal(0.0, ALTITUDE_NOISE_M))
+            self._schedule(received, self._deliver_range, max(0.0, altitude))
+
         if self._stereo_period is not None and t >= self._next_stereo_t - _EPS:
             # Stereo pairs come from the VIO cameras: they share the frame's sequence and capture time
             self._next_stereo_t += self._stereo_period
@@ -447,6 +460,9 @@ class SimPoseSource(PoseSource):
 
     def _in_window(self, t: float, kind: str) -> bool:
         return any(e.event == kind and e.at_s - _EPS <= t < e.at_s + e.duration_s - _EPS for e in self.script)
+
+    def _deliver_range(self, due: float, altitude_m: float) -> None:
+        self._call(self.callbacks.on_range, RangeSample(self._now_wall(due), altitude_m, 100, 0.8))
 
     def _deliver_pose(self, due: float, t_capture: float, position: tuple, quaternion: tuple, tracking: bool) -> None:
         received = self._now_wall(due)

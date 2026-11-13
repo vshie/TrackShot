@@ -75,6 +75,25 @@ def encode_char_arrays(msg_type: str, fields: dict, mode: str) -> dict:
     return out
 
 
+def encode_enums(msg_type: str, fields: dict) -> dict:
+    """Copy of `fields` in mavlink2rest's (rust-mavlink's serde) form for enums: an enum field is
+    {"type": "<ENUM_ENTRY_NAME>"} rather than its number, and a field called `type` is `mavtype`
+    (the frame's own "type" is the message name). The builders keep plain numbers, which is what
+    the UDP transport (pymavlink) wants."""
+    cls = getattr(ardupilotmega, f"MAVLink_{msg_type.lower()}_message", None)
+    enum_fields = getattr(cls, "fieldenums_by_name", {}) if cls is not None else {}
+    out = {}
+    for name, v in fields.items():
+        enum = enum_fields.get(name)
+        if enum and isinstance(v, int) and not isinstance(v, bool):
+            entry = ardupilotmega.enums.get(enum, {}).get(v)
+            if entry is None:
+                raise ValueError(f"{msg_type}.{name}: {v} isn't an entry of {enum}")
+            v = {"type": entry.name}
+        out["mavtype" if name == "type" else name] = v
+    return out
+
+
 def classify_m2r_reply(text: str) -> Optional[str]:
     """mavlink2rest answers every frame we send. Returns None if `text` isn't such an answer
     (vehicle traffic when a filter lets it through), "" for success, else the error text.
@@ -346,7 +365,7 @@ class Mavlink2RestTransport(_QueuedTransport):
                 "component_id": self.source_component,
                 "sequence": self._sequence,
             },
-            "message": {"type": msg_type, **encode_char_arrays(msg_type, fields, mode)},
+            "message": {"type": msg_type, **encode_enums(msg_type, encode_char_arrays(msg_type, fields, mode))},
         }
         text = json.dumps(frame, allow_nan=False)   # mavlink2rest can't take NaN/inf as a float
         with self._app_lock:

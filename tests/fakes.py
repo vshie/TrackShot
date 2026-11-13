@@ -48,6 +48,7 @@ class FakeAutopilotParams:
         self.armed = armed
         self.cancel = threading.Event()
         self.check_calls: list[Optional[int]] = []
+        self.rangefinder_calls: list[bool] = []
         self.apply_calls: list[list[dict]] = []
         self.revert_calls: int = 0
         self.preview_calls: int = 0
@@ -75,9 +76,10 @@ class FakeAutopilotParams:
     def vehicle_key(self, request_timeout: float = 2.0) -> str:
         return self.vehicle_identity()[0]
 
-    def check(self, suggested_viso_delay_ms: Optional[int] = None) -> list[dict]:
+    def check(self, suggested_viso_delay_ms: Optional[int] = None, include_rangefinder: bool = False) -> list[dict]:
         self.threads.append(threading.get_ident())
         self.check_calls.append(suggested_viso_delay_ms)
+        self.rangefinder_calls.append(include_rangefinder)
         time.sleep(self.delay_s)
         if self.error is not None:
             raise self.error

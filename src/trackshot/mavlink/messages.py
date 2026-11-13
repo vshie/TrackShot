@@ -7,6 +7,7 @@ Field names are pymavlink's (mavlink2rest's JSON uses the same ones). `char[N]` 
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Optional
 
 from pymavlink.dialects.v20 import ardupilotmega
 
@@ -55,6 +56,32 @@ def vision_speed_estimate(e: NedEstimate) -> tuple[str, dict]:
         "z": float(e.velocity[2]),
         "covariance": [0.0] * 9,
         "reset_counter": 0,
+    }
+
+
+# DISTANCE_SENSOR constants
+MAV_DISTANCE_SENSOR_UNKNOWN = 4
+MAV_SENSOR_ROTATION_PITCH_270 = 25      # pointing down; RNGFND1_ORIENT must match
+DISTANCE_SENSOR_ID = 1
+
+
+def distance_sensor(distance_m: Optional[float], quality: int, time_boot_ms: int,
+                    min_m: float, max_m: float) -> tuple[str, dict]:
+    """A downward rangefinder reading. No distance goes out as 0 cm at quality 1 (worst), which
+    ArduSub reads as out of range: SURFTRAK stops trusting it within a reading or two."""
+    return "DISTANCE_SENSOR", {
+        "time_boot_ms": int(time_boot_ms) & 0xFFFFFFFF,
+        "min_distance": int(round(min_m * 100)),
+        "max_distance": int(round(max_m * 100)),
+        "current_distance": 0 if distance_m is None else int(round(distance_m * 100)),
+        "type": MAV_DISTANCE_SENSOR_UNKNOWN,
+        "id": DISTANCE_SENSOR_ID,
+        "orientation": MAV_SENSOR_ROTATION_PITCH_270,
+        "covariance": 255,                      # unknown
+        "horizontal_fov": 0.0,
+        "vertical_fov": 0.0,
+        "quaternion": [0.0, 0.0, 0.0, 0.0],
+        "signal_quality": 1 if distance_m is None else max(1, min(100, int(quality))),
     }
 
 

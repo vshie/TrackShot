@@ -103,6 +103,74 @@ every delta whatever its confidence, so a wrong "not moving" is worse than nothi
 - **The log:** "lost" and "regained" messages come in pairs, with at most one "lost" message
   every 10 s. Losses in between are counted into the next message.
 
+### Seabed following without a DVL
+
+With RTAB-Map and the camera looking straight down (camera angle 90°), TrackShot measures the
+altitude above the seabed from the stereo depth it already receives: the median depth in the
+middle of the image, up to 10 m. With *Send altitude as a rangefinder* on, it sends that as a
+downward DISTANCE_SENSOR (orientation 25) at 10 Hz. That is all ArduSub needs to follow the
+seabed: no script.
+
+1. **TrackShot:** RTAB-Map, Settings → VIO → Camera angle 90°, Settings → MAVLink → *Send
+   altitude as a rangefinder*.
+2. **Autopilot:** Autopilot panel → Check, then Apply. With the altitude option on, the check
+   includes:
+
+   | Parameter | Value | Why |
+   |---|---|---|
+   | `RNGFND1_TYPE` | 10 (MAVLink; needs a reboot) | |
+   | `RNGFND1_ORIENT` | 25 (down) | |
+   | `RNGFND1_MIN` / `RNGFND1_MAX` | 0.3 / 10 m | |
+   | `WP_RFND_USE` | 1 | waypoints use the rangefinder |
+   | `FS_TERRAIN_ENAB` | 1 | Hold Position instead of the default Disarm when the terrain reference is lost in AUTO |
+
+3. **Mission:** plan the survey in Cockpit with Altitude = **Relative to terrain**. The waypoint
+   altitude is the height above the seabed.
+4. **Fly AUTO.** ArduSub holds each waypoint's height above the seabed from TrackShot's altitude.
+   SURFTRAK uses the same rangefinder when flying by hand.
+
+Caveats:
+- **Signal quality:** about half the middle of the image must have depth for quality 100. With
+  less, the quality falls below a typical `RNGFND_SQ_MIN` of 90, and ArduSub stops trusting the
+  reading (with `FS_TERRAIN_ENAB` 1, AUTO then holds position).
+- **The DVL:** leave the altitude option off while a DVL feeds the same rangefinder, and turn
+  the DVL's DISTANCE_SENSOR off when TrackShot replaces it.
+- **Not yet flown in the water.** Compare TrackShot's altitude with the DVL's on a first dive.
+
+### Cockpit widget
+
+TrackShot serves a small page that Cockpit can show in its **IFrame** widget, so the pilot can
+watch and control TrackShot without leaving Cockpit. It shows:
+- **the VIO camera image** with the tracked features as green dots, and the tracking lock (good,
+  acquiring or lost, and whether TrackShot is sending);
+- **pressure depth, TrackShot's altitude and the rangefinder** as the autopilot sees it;
+- **Start/Stop tracking and Record/Stop recording** buttons, the same as the toolbar's.
+
+**Adding it to Cockpit:**
+
+1. Start TrackShot. The **Cockpit widget** panel (or Help → *Add TrackShot to Cockpit…*) shows
+   the URL with a Copy button:
+   - `http://localhost:5425/widget` when Cockpit runs on the same computer;
+   - `http://<this computer's address>:5425/widget` (the 192.168.2.x one is listed first) when
+     Cockpit runs on another computer on the network.
+2. In Cockpit, open the main menu and choose **Edit Interface**.
+3. In the widget list (*Regular*), drag the **IFrame** card onto the view.
+4. Open the new widget's settings, paste the URL into **Iframe Source** and press **✓** (Set).
+   Leave *Use vehicle address as base URL* (Advanced options) off.
+5. Size and place it, then leave edit mode.
+
+**Notes:**
+- **TrackShot must be running** for the widget to show anything; it says *TrackShot not
+  reachable* otherwise.
+- **Settings → Cockpit widget:** turn the widget on or off, change the port (5425), and choose
+  whether it's reachable from the network.
+- **Anyone on the network can start and stop tracking and recording** while the widget is
+  reachable from the network (the default). There is no login; untick *Reachable from the
+  network* if Cockpit runs on the same computer.
+- **Cockpit only lists widgets advertised by the vehicle's BlueOS,** so this one is added by URL.
+  A small BlueOS "link" extension could make it appear in the list automatically; that's for
+  later.
+
 ### Logs
 
 - `~/Library/Logs/TrackShot/trackshot.log`: everything in the Log panel (rotating, 5 MB × 3).

@@ -58,6 +58,38 @@ VISUAL_ODOMETRY_PARAMS = [
     ("EK3_SRC_OPTIONS", 0, False),
 ]
 
+# TrackShot's stereo altitude as the autopilot's downward rangefinder (Settings → "Send altitude
+# as a rangefinder"), for AUTO terrain following (waypoints planned "Relative to terrain") and
+# SURFTRAK. Checked only with that option on, so a DVL setup isn't asked to change. The limits
+# match trackshot.core.altitude.
+RANGEFINDER_PARAMS = [
+    ("RNGFND1_TYPE", 10, True),        # MAVLink (DISTANCE_SENSOR)
+    ("RNGFND1_ORIENT", 25, False),     # pointing down (MAV_SENSOR_ROTATION_PITCH_270)
+    ("RNGFND1_MIN", 0.3, False),       # m (ArduSub 4.7 uses metres)
+    ("RNGFND1_MAX", 10.0, False),      # m
+    ("WP_RFND_USE", 1, False),         # waypoints use the rangefinder for terrain following
+    # Hold position, not the default disarm, if the terrain reference (the stereo altitude) is lost
+    # in AUTO: featureless sand can make it drop out
+    ("FS_TERRAIN_ENAB", 1, False),
+]
+
+# Parameter groups ArduPilot hides until their enabling parameter is set and it reboots
+HIDDEN_UNTIL_REBOOT = {"VISO_": ("VISO_TYPE", 1), "RNGFND1_": ("RNGFND1_TYPE", 10)}
+
+
+def _hidden_by(name: str) -> Optional[tuple[str, int]]:
+    """(enabling parameter, value) when ArduPilot hides `name` until that is set and it reboots."""
+    for prefix, (enabler, value) in HIDDEN_UNTIL_REBOOT.items():
+        if name.startswith(prefix) and name != enabler:
+            return enabler, value
+    return None
+
+
+def _hidden_hint(name: str) -> str:
+    hidden = _hidden_by(name)
+    return "" if hidden is None else f" (set {hidden[0]}={hidden[1]} and reboot first)"
+
+
 VISO_DELAY_PARAM = "VISO_DELAY_MS"
 VISO_DELAY_RANGE_MS = (0, 250)     # ArduPilot's documented range for VISO_DELAY_MS
 VISO_DELAY_TOLERANCE_MS = 10       # the suggestion is rounded to 10 ms; closer isn't worth a write
@@ -278,7 +310,8 @@ class AutopilotParams:
             raise NoHeartbeat("no autopilot HEARTBEAT in mavlink2rest")
         return is_armed_heartbeat(heartbeat["message"])
 
-    def check(self, suggested_viso_delay_ms: Optional[int] = None) -> list[dict]:
+    def check(self, suggested_viso_delay_ms: Optional[int] = None,
+              include_rangefinder: bool = False) -> list[dict]:
         """Compares the autopilot with what VIO needs. Read-only.
 
         Returns one row per parameter: {name, current, recommended, needs_reboot, ok, param_type}.
@@ -287,6 +320,8 @@ class AutopilotParams:
         """
         self.is_armed()  # surfaces AutopilotUnreachable / NoHeartbeat before reading anything
         wanted = list(VISUAL_ODOMETRY_PARAMS)
+        if include_rangefinder:
+            wanted += RANGEFINDER_PARAMS
         if suggested_viso_delay_ms is not None:
             wanted.append((VISO_DELAY_PARAM, int(suggested_viso_delay_ms), False))
         rows = []
@@ -299,7 +334,7 @@ class AutopilotParams:
             elif name == VISO_DELAY_PARAM:
                 ok = abs(current - recommended) <= VISO_DELAY_TOLERANCE_MS
             else:
-                ok = current == recommended
+                ok = _same(current, recommended)
             if ok:
                 logger.info(f"{name} = {current:g} (already set)")
             rows.append({"name": name, "current": current, "recommended": recommended,
@@ -365,10 +400,8 @@ class AutopilotParams:
         written either (the vehicle armed), else None."""
         name, wanted = diff["name"], diff["recommended"]
         if diff.get("param_type") is None:
-            result["error"] = "not reported by the autopilot"
-            if name.startswith("VISO_") and name != "VISO_TYPE":
-                # ArduPilot hides the VISO_* group until VISO_TYPE is set and it has rebooted
-                result["error"] += " (set VISO_TYPE=1 and reboot first)"
+            # ArduPilot hides the VISO_* and RNGFND1_* groups until enabled and rebooted
+            result["error"] = "not reported by the autopilot" + _hidden_hint(name)
             return None
         param_type = diff["param_type"]
         original = diff["current"]
@@ -617,9 +650,10 @@ class AutopilotParams:
         read = self._read(name, cancellable=False)
         if read is None:
             result["error"] = "not reported by the autopilot"
-            if name.startswith("VISO_") and name != "VISO_TYPE":
-                result["error"] += (" (ArduPilot hides it unless VISO_TYPE was 1 when the autopilot "
-                                    "started: set VISO_TYPE=1, reboot, then revert)")
+            hidden = _hidden_by(name)
+            if hidden is not None:
+                result["error"] += (f" (ArduPilot hides it unless {hidden[0]} was {hidden[1]} when the "
+                                    f"autopilot started: set {hidden[0]}={hidden[1]}, reboot, then revert)")
             return None
         current, reported_type = read
         row = self._revert_row(entry, current)

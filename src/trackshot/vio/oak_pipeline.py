@@ -45,7 +45,9 @@ import numpy as np
 from loguru import logger
 
 from trackshot import capabilities
+from trackshot.core.altitude import range_from_depth
 from trackshot.vio.source import (
+    RangeSample,
     STATE_CONNECTING,
     STATE_ERROR,
     STATE_IDLE,
@@ -73,6 +75,7 @@ PREVIEW_MAX_HZ = 10.0
 FRAME_WAIT_S = 0.2
 # Pose and frame output queues: a stall shorter than this many VIO frames (3 s at 10 fps) loses nothing
 VIO_QUEUE_SIZE = 32
+RANGE_HZ = 10.0           # altitude (DISTANCE_SENSOR) rate; ArduSub times a MAVLink rangefinder out after 0.5 s
 # How long a stop waits for a started Basalt pipeline's first frame, so that it can be stopped safely
 BASALT_FIRST_FRAME_WAIT_S = 3.0
 # Device timestamps older than this (or in the future) are unset or nonsensical
@@ -588,6 +591,8 @@ class _Session:
         self.q_pose = None
         self.q_frame = None
         self.q_features = None
+        self.q_depth = None         # RTAB-Map's passthrough of the depth it received: altitude
+        self.next_range_t = 0.0
         self.q_color = None
         self.captures: dict[str, tuple] = {}   # stream -> (queue, lens)
         # Bytes crossing the tether per VIO frame, as a multiple of the frame the host sees
@@ -627,6 +632,10 @@ class _Session:
         # sized to absorb a stall without dropping either side (see _poll for when they overflow)
         self.q_pose = odom.transform.createOutputQueue(maxSize=VIO_QUEUE_SIZE, blocking=False)
         self.q_frame = frame_out.createOutputQueue(maxSize=VIO_QUEUE_SIZE, blocking=False)
+        if s.backend == "rtabmap":
+            # The depth frames RTAB-Map already received, passed through on this computer: the
+            # altitude costs no tether bandwidth. (Basalt has no stereo depth to tap.)
+            self.q_depth = odom.passthroughDepth.createOutputQueue(maxSize=2, blocking=False)
 
         center = self._build_center_camera()
         if center is not None and s.preview_enabled and s.color_preview_enabled:
@@ -759,6 +768,7 @@ class _Session:
                 if not self.pipeline.isRunning():
                     raise _Failure("Lost the camera: the pipeline stopped (tether or camera power?)")
                 got = self._poll()
+                got = self._poll_depth() or got
                 self._check_temperature()
                 if not got:
                     stop.wait(0.005)
@@ -951,6 +961,25 @@ class _Session:
         self.source._call(self.source.callbacks.on_capture, CapturedJpeg(
             stream=stream, data=data, t_capture=t_capture if t_capture is not None else wall_now,
             sequence=frame.getSequenceNum(), lens=lens))
+
+    def _poll_depth(self) -> bool:
+        """Altitude from the newest depth frame, at most RANGE_HZ."""
+        if self.q_depth is None:
+            return False
+        frames = self.q_depth.tryGetAll()
+        if not frames:
+            return False
+        now = time.monotonic()
+        if now < self.next_range_t:
+            return True
+        self.next_range_t = now + 1.0 / RANGE_HZ
+        frame = frames[-1]
+        wall_now = time.time()
+        t = device_time_to_wall(frame.getTimestamp(), dai.Clock.now(), wall_now) or wall_now
+        estimate = range_from_depth(frame.getFrame(), t)
+        self.source._call(self.source.callbacks.on_range,
+                          RangeSample(estimate.t, estimate.distance_m, estimate.quality, estimate.valid_fraction))
+        return True
 
     def _check_temperature(self) -> None:
         now = time.monotonic()

@@ -46,9 +46,11 @@ TELEMETRY_KEYS = ("lat", "lon", "heading_deg", "roll_deg", "pitch_deg",
                   "yaw_rad", "yaw_time", "local_ne", "local_ne_time")
 
 try:
-    from pymavlink.mavutil import mode_mapping_sub as _ARDUSUB_MODES
+    from pymavlink.mavutil import mode_mapping_sub as _PYMAVLINK_SUB_MODES
 except ImportError:  # pymavlink is a dependency, but a missing table only costs mode names
-    _ARDUSUB_MODES = {}
+    _PYMAVLINK_SUB_MODES = {}
+# pymavlink's table predates SURFTRAK (ArduSub 4.5, mode 21)
+_ARDUSUB_MODES = {**_PYMAVLINK_SUB_MODES, 21: "SURFTRAK"}
 
 
 def get_message(base: str, name: str, system_id: int = 1, component_id: int = 1,

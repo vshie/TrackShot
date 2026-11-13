@@ -321,3 +321,16 @@ def test_make_transport():
     s.udp_url = "udpout:127.0.0.1:14550"
     t = make_transport(s)
     assert isinstance(t, UdpTransport) and t.target == "udpout:127.0.0.1:14550"
+
+
+def test_enums_go_to_mavlink2rest_as_objects_and_type_as_mavtype():
+    from trackshot.mavlink import messages
+    from trackshot.mavlink.transport import encode_enums
+    msg_type, fields = messages.distance_sensor(2.5, 100, 1000, 0.3, 10.0)
+    out = encode_enums(msg_type, fields)
+    assert out["orientation"] == {"type": "MAV_SENSOR_ROTATION_PITCH_270"}
+    assert out["mavtype"] == {"type": "MAV_DISTANCE_SENSOR_UNKNOWN"} and "type" not in out
+    assert out["current_distance"] == 250 and out["signal_quality"] == 100
+    # messages without enums pass through untouched
+    msg_type, fields = vision_position_delta(DELTA)
+    assert encode_enums(msg_type, fields) == fields

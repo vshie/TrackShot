@@ -5,6 +5,7 @@
 #     scripts/build_macos.sh            # full build
 #     SKIP_TESTS=1 scripts/build_macos.sh
 #     PYTHON=/path/to/python scripts/build_macos.sh   # e.g. CI: an interpreter other than .venv's
+#     DIST=dist-next scripts/build_macos.sh           # build beside a copy that is running
 #
 # The app is signed ad hoc ("-"), which is enough to launch it on this Mac. On another Mac,
 # Gatekeeper will refuse it until it is opened with right-click → Open (or signed and notarised
@@ -14,7 +15,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 PY="${PYTHON:-$ROOT/.venv/bin/python}"
-APP="$ROOT/dist/TrackShot.app"
+DIST="${DIST:-dist}"
+[[ "$DIST" = /* ]] || DIST="$ROOT/$DIST"
+APP="$DIST/TrackShot.app"
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
     echo "This script builds the macOS arm64 app; this machine is $(uname -s) $(uname -m)." >&2
@@ -45,7 +48,7 @@ fi
 
 echo "==> PyInstaller"
 "$PY" -m PyInstaller --noconfirm --clean --log-level WARN \
-    --distpath "$ROOT/dist" --workpath "$ROOT/build" packaging/trackshot.spec
+    --distpath "$DIST" --workpath "$ROOT/build" packaging/trackshot.spec
 
 echo "==> Minimum macOS"
 # Fails if any bundled binary needs a newer macOS than Info.plist's LSMinimumSystemVersion

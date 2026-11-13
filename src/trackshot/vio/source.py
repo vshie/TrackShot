@@ -36,6 +36,15 @@ class PoseSample:
     tracking: Optional[bool] = None              # backend's own tracking flag if it has one
 
 
+@dataclass(frozen=True)
+class RangeSample:
+    """Distance along the camera's optical axis to what it sees (the seabed, looking down)."""
+    t: float                                     # wall-clock s of the depth frame
+    distance_m: Optional[float]                  # None: no usable depth
+    quality: int                                 # 1–100
+    valid_fraction: float
+
+
 @dataclass
 class PreviewFrame:
     kind: str                                    # "vio" (grey VIO image) or "color" (centre camera)
@@ -71,6 +80,7 @@ class SourceCallbacks:
     on_pose: Callable[[PoseSample], None] = lambda s: None
     on_preview: Callable[[PreviewFrame], None] = lambda f: None
     on_capture: Callable[[CapturedJpeg], None] = lambda j: None
+    on_range: Callable[[RangeSample], None] = lambda r: None                       # ~10 Hz, if the source has depth
     on_state: Callable[[str, Optional[str]], None] = lambda state, message: None   # (STATE_*, human message)
     on_log: Callable[[str, str], None] = lambda level, message: None               # ("info"|"warning"|"error", text)
 

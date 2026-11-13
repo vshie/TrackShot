@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TrackShot</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#e6edf3; --muted:#8b949e;
+          --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+               font:13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { display:flex; flex-direction:column; gap:6px; padding:6px; }
+  header { display:flex; align-items:center; gap:8px; }
+  header .title { font-weight:700; letter-spacing:.02em; }
+  .badge { padding:1px 8px; border:1.5px solid var(--muted); border-radius:9px; font-weight:700;
+           font-size:11px; text-transform:uppercase; color:var(--muted); }
+  .spacer { flex:1; }
+  .view { position:relative; flex:1; min-height:120px; background:#000; border:1px solid var(--border);
+          border-radius:6px; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+  .view img { max-width:100%; max-height:100%; object-fit:contain; image-rendering:auto; }
+  .view .note { position:absolute; color:var(--muted); text-align:center; padding:8px; }
+  .lock { position:absolute; left:6px; top:6px; padding:2px 8px; border-radius:6px; font-weight:700;
+          background:rgba(13,17,23,.75); border:1px solid var(--border); }
+  .cards { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:4px 8px; }
+  .card .k { color:var(--muted); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card .v { font-size:18px; font-weight:700; }
+  .card .d { color:var(--muted); font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .buttons { display:flex; gap:6px; }
+  button { flex:1; padding:7px 6px; border-radius:6px; border:1px solid var(--border); background:var(--panel);
+           color:var(--text); font-weight:700; font-size:13px; cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button:disabled { opacity:.45; cursor:default; }
+  button.rec.on { background:var(--bad); border-color:var(--bad); color:#fff; }
+  .offline { color:var(--bad); }
+</style>
+</head>
+<body>
+  <header>
+    <span class="title">TrackShot</span>
+    <span class="badge" id="state">—</span>
+    <span class="spacer"></span>
+    <span class="d" id="fps" style="color:var(--muted)"></span>
+  </header>
+  <div class="view">
+    <img id="preview" alt="" hidden>
+    <div class="note" id="note">Waiting for TrackShot…</div>
+    <div class="lock" id="lock" hidden>—</div>
+  </div>
+  <div class="cards">
+    <div class="card"><div class="k">Depth</div><div class="v" id="depth">—</div><div class="d">pressure sensor</div></div>
+    <div class="card"><div class="k">Altitude</div><div class="v" id="alt">—</div><div class="d" id="altd">TrackShot stereo</div></div>
+    <div class="card"><div class="k">Rangefinder</div><div class="v" id="rf">—</div><div class="d">as the autopilot sees it</div></div>
+  </div>
+  <div class="buttons">
+    <button id="vio">Start tracking</button>
+    <button id="rec" class="rec">Record</button>
+  </div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const COLOURS = { good:"var(--ok)", degraded:"var(--warn)", acquiring:"var(--warn)", lost:"var(--bad)" };
+const STATE_COLOURS = { running:"var(--ok)", connecting:"var(--warn)", error:"var(--bad)" };
+let last = null, reachable = false, busy = false, previewUrl = null;
+
+const m = (v) => (v === null || v === undefined) ? "—" : v.toFixed(2) + " m";
+
+function render(s) {
+  const state = $("state");
+  state.textContent = reachable ? s.state : "offline";
+  const sc = reachable ? (STATE_COLOURS[s.state] || "var(--muted)") : "var(--bad)";
+  state.style.color = sc; state.style.borderColor = sc;
+  $("fps").textContent = reachable && s.vio_fps ? s.vio_fps.toFixed(1) + " fps" : "";
+
+  const lock = $("lock");
+  const running = reachable && (s.state === "running" || s.state === "connecting");
+  lock.hidden = !running;
+  let text = s.tracking;
+  if (s.tracking === "lost" && s.lost_for_s) text = "lost " + Math.round(s.lost_for_s) + " s";
+  lock.textContent = (text || "—").toUpperCase() + (s.sending ? " · sending" : " · not sending");
+  lock.style.color = COLOURS[s.tracking] || "var(--muted)";
+
+  $("depth").textContent = m(s.depth_m);
+  $("alt").textContent = m(s.altitude_m);
+  $("altd").textContent = s.altitude_m === null ? "TrackShot stereo"
+    : "q " + s.altitude_quality + " %" + (s.altitude_sending ? " · rangefinder" : " · not sent");
+  $("rf").textContent = m(s.rangefinder_m);
+
+  const vio = $("vio");
+  vio.textContent = running ? "Stop tracking" : "Start tracking";
+  vio.disabled = !reachable || busy;
+  const rec = $("rec");
+  rec.textContent = s.recording ? "Stop recording (" + s.images + ")" : "Record";
+  rec.classList.toggle("on", !!s.recording);
+  rec.disabled = !reachable || busy;
+
+  const note = $("note");
+  if (!reachable) { note.hidden = false; note.innerHTML = '<span class="offline">TrackShot not reachable</span><br>Is the app running?'; }
+  else if (!running) { note.hidden = false; note.textContent = "Tracking stopped"; $("preview").hidden = true; }
+}
+
+async function poll() {
+  try {
+    const r = await fetch("status", { cache:"no-store" });
+    last = await r.json(); reachable = true;
+  } catch (e) { reachable = false; last = last || {}; }
+  render(last || {});
+}
+
+async function refreshPreview() {
+  if (!reachable || !last || !(last.state === "running" || last.state === "connecting")) return;
+  try {
+    const r = await fetch("preview.jpg?t=" + Date.now(), { cache:"no-store" });
+    if (r.status !== 200) return;
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const img = $("preview");
+    img.onload = () => { if (previewUrl) URL.revokeObjectURL(previewUrl); previewUrl = url; };
+    img.src = url; img.hidden = false; $("note").hidden = true;
+  } catch (e) { /* the status poll reports the outage */ }
+}
+
+async function command(path, body) {
+  busy = true; render(last || {});
+  try { await fetch(path, { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify(body) }); }
+  catch (e) { /* shown by the next poll */ }
+  busy = false; setTimeout(poll, 150);
+}
+
+$("vio").onclick = () => {
+  const running = last && (last.state === "running" || last.state === "connecting");
+  command("vio", { run: !running });
+};
+$("rec").onclick = () => command("record", { on: !(last && last.recording) });
+
+poll();
+setInterval(poll, 330);
+setInterval(refreshPreview, 200);
+</script>
+</body>
+</html>

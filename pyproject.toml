@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trackshot"
-version = "0.1.1"
+version = "0.2.0"
 description = "Topside visual-inertial odometry for BlueOS ROVs: OAK-D VIO on the surface computer, VISION_POSITION_DELTA to ArduSub"
 requires-python = ">=3.11"
 dependencies = [

@@ -35,6 +35,7 @@ from trackshot.autopilot.params import AutopilotParams
 from trackshot.autopilot.telemetry import VehicleTelemetry
 from trackshot.capture.writer import CaptureWriter
 from trackshot.config import Settings
+from trackshot.core import altitude
 from trackshot.core.ned import NedTracker
 from trackshot.runlog import RunLog
 from trackshot.core.odometry import OdometryProcessor, apply_camera_rotation, create_camera_rotation_matrix
@@ -42,7 +43,7 @@ from trackshot.mavlink import messages
 from trackshot.mavlink.base import Transport
 from trackshot.mavlink.transport import make_transport
 from trackshot.vio.source import (STATE_CONNECTING, STATE_ERROR, STATE_IDLE, STATE_RUNNING, STATE_STOPPED,
-                                  CapturedJpeg, PoseSample, PoseSource, PreviewFrame, SourceCallbacks)
+                                  CapturedJpeg, PoseSample, PoseSource, PreviewFrame, RangeSample, SourceCallbacks)
 
 STATUS_INTERVAL_MS = 250          # statusUpdated at 4 Hz
 POSE_MAX_HZ = 20.0                # the trajectory can't show more, and Qt's event queue shouldn't carry it
@@ -60,6 +61,7 @@ RESTART_VIO_COOLDOWN_S = 20.0
 LIVE_FIELDS = frozenset({
     "preview_enabled", "capture_dir", "min_free_gb", "source_tag", "send_health", "health_rate_hz",
     "tether_budget_mbit", "video_allowance_mbit",
+    "widget_enabled", "widget_port", "widget_lan",   # the main window's widget server
 })
 # Fields the CaptureWriter was built with: a change replaces the writer
 WRITER_FIELDS = frozenset({"capture_dir", "min_free_gb", "camera_angle_deg"})
@@ -149,6 +151,9 @@ class _Run:
         self.output_logged = False
         self.last_nav: Optional[tuple[float, float, float]] = None   # north, east, heading (rad) for the map
         self.runlog: Optional[RunLog] = None
+        self.last_range: Optional[RangeSample] = None
+        self.range_throttle = _Throttle(10.0)
+        self.range_warned = False
         self.rotation = (create_camera_rotation_matrix(settings.camera_angle_deg)
                          if settings.camera_angle_deg else None)
         self.source: Optional[PoseSource] = None
@@ -252,6 +257,14 @@ class Engine(QObject):
         if self._state not in (STATE_IDLE, STATE_STOPPED):
             self._set_state(STATE_STOPPED, "Stopped")
 
+    @staticmethod
+    def _altitude_status(run: Optional[_Run]) -> Optional[dict]:
+        if run is None or run.last_range is None:
+            return None
+        r = run.last_range
+        return {"distance_m": r.distance_m, "quality": r.quality, "age_s": time.time() - r.t,
+                "sending": run.settings.send_distance_sensor and run.settings.camera_angle_deg == 90.0}
+
     def restart_vio(self) -> bool:
         """The pilot's "Restart VIO": a fresh camera pipeline and VIO, keeping the settings,
         recording and MAVLink link setup. For a VIO that stays lost (RTAB-Map already resets
@@ -334,6 +347,7 @@ class Engine(QObject):
             "transport": run.transport.stats() if run and run.transport else None,
             "capture": self._writer.snapshot() if self._writer is not None else None,
             "telemetry": run.telemetry.latest() if run and run.telemetry else None,
+            "altitude": self._altitude_status(run),
             "bandwidth": bandwidth.estimate(self._settings),
         }
 
@@ -381,6 +395,7 @@ class Engine(QObject):
             on_pose=lambda sample: self._on_pose(run, sample),
             on_preview=lambda frame: self._on_preview(run, frame),
             on_capture=lambda jpeg: self._on_capture(run, jpeg),
+            on_range=lambda sample: self._on_range(run, sample),
             on_state=lambda state, message: self._emit_safely(self._sourceState, run, state, message or ""),
             # Both sources also write every log line to loguru, which the engine's sink forwards to
             # logMessage; forwarding on_log as well would show each line twice
@@ -562,7 +577,10 @@ class Engine(QObject):
         row = dict(t_wall=sample.t_received, t_capture_us=sample.t_capture_us, sent=sent,
                    tracking=processor.tracking_state(), sending=processor.is_sending(),
                    ap_heading_deg=telemetry.get("heading_deg"), ap_roll_deg=telemetry.get("roll_deg"),
-                   ap_pitch_deg=telemetry.get("pitch_deg"), ap_depth_m=telemetry.get("depth_m"))
+                   ap_pitch_deg=telemetry.get("pitch_deg"), ap_depth_m=telemetry.get("depth_m"),
+                   ap_rangefinder_m=telemetry.get("altitude_m"))
+        if run.last_range is not None:
+            row.update(alt_m=run.last_range.distance_m, alt_quality=run.last_range.quality)
         row.update(zip(("cam_x", "cam_y", "cam_z", "cam_qw", "cam_qx", "cam_qy", "cam_qz"),
                        (*sample.position, *sample.quaternion)))
         row.update(zip(("veh_x", "veh_y", "veh_z", "veh_qw", "veh_qx", "veh_qy", "veh_qz"), pose))
@@ -572,6 +590,23 @@ class Engine(QObject):
             row.update(ned_n=estimate.position[0], ned_e=estimate.position[1], ned_vn=estimate.velocity[0],
                        ned_ve=estimate.velocity[1], ned_heading_deg=math.degrees(estimate.yaw) % 360)
         run.runlog.row(**row)
+
+    def _on_range(self, run: _Run, sample: RangeSample) -> None:
+        """Source thread: the stereo altitude, sent as a downward DISTANCE_SENSOR if enabled."""
+        if not run.active:
+            return
+        run.last_range = sample
+        s = run.settings
+        if not s.send_distance_sensor or run.transport is None or not run.range_throttle.ready(time.monotonic()):
+            return
+        if s.camera_angle_deg != 90.0:
+            if not run.range_warned:
+                run.range_warned = True
+                logger.warning("Altitude not sent: DISTANCE_SENSOR is a downward rangefinder, and the camera "
+                               f"angle is {s.camera_angle_deg:g}° (set 90 for a camera looking straight down)")
+            return
+        run.transport.send(*messages.distance_sensor(sample.distance_m, sample.quality, run.time_boot_ms(),
+                                                     altitude.MIN_RANGE_M, altitude.MAX_RANGE_M))
 
     def _on_preview(self, run: _Run, frame: PreviewFrame) -> None:
         if not run.active:

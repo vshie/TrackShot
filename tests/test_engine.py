@@ -17,6 +17,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from loguru import logger  # noqa: E402
 from PySide6.QtCore import QSettings  # noqa: E402
@@ -30,7 +31,7 @@ from trackshot.vio.source import (STATE_ERROR, STATE_RUNNING, STATE_STOPPED, Pos
                                   SourceStats)
 
 FPS = 20
-STATUS_KEYS = {"state", "source", "odometry", "transport", "capture", "telemetry", "bandwidth"}
+STATUS_KEYS = {"state", "source", "odometry", "transport", "capture", "telemetry", "bandwidth", "altitude"}
 # Simulated seconds after RUNNING: a 0.8 m VIO jump (16 m/s implied), then 2.3 s with no poses
 JUMP_AT_S, DROPOUT_AT_S, DROPOUT_S = 1.0, 1.5, 2.3
 FAULT_SCRIPT = [
@@ -620,3 +621,38 @@ def test_a_run_writes_its_data_log(qtbot, fake, make_settings, make_engine, isol
     sent = [r for r in rows if r["sent"] == "estimate"]
     assert sent and all(r["ned_n"] and r["d_fwd"] and r["ap_heading_deg"] for r in sent)
     assert {r["tracking"] for r in rows} >= {"acquiring", "tracking"}
+
+
+# --- Altitude (DISTANCE_SENSOR) and SURFTRAK ----------------------------------------------------------
+
+def test_altitude_goes_out_as_a_downward_rangefinder_when_enabled(qtbot, fake, make_settings, make_engine):
+    engine = make_engine(make_settings(send_distance_sensor=True, camera_angle_deg=90.0))
+    engine.start()
+    qtbot.waitUntil(lambda: len(fake.received("DISTANCE_SENSOR")) >= 10, timeout=10000)
+    status = engine.status()["altitude"]
+    engine.stop()
+    assert engine.wait_idle(8.0)
+    readings = fake.received("DISTANCE_SENSOR")
+    # mavlink2rest's form: enums as {"type": NAME}, the `type` field as `mavtype`
+    assert all(m["orientation"] == {"type": "MAV_SENSOR_ROTATION_PITCH_270"}
+               and m["mavtype"] == {"type": "MAV_DISTANCE_SENSOR_UNKNOWN"}
+               and m["min_distance"] == 30 and m["max_distance"] == 1000 for m in readings)
+    assert all(m["_header"] == {"system_id": 1, "component_id": 197} for m in readings)
+    # The simulator's seabed is 2.5 m below the start
+    assert np.median([m["current_distance"] for m in readings]) == pytest.approx(250, abs=15)
+    assert status["sending"] and status["distance_m"] == pytest.approx(2.5, abs=0.2)
+
+
+@pytest.mark.parametrize("overrides", [dict(send_distance_sensor=False, camera_angle_deg=90.0),
+                                       dict(send_distance_sensor=True, camera_angle_deg=0.0)])
+def test_no_rangefinder_unless_enabled_and_looking_down(qtbot, fake, make_settings, make_engine, overrides):
+    engine = make_engine(make_settings(**overrides))
+    rec = Recorder(engine)
+    engine.start()
+    qtbot.waitUntil(lambda: engine.status()["altitude"] is not None, timeout=8000)
+    qtbot.wait(1000)
+    engine.stop()
+    assert engine.wait_idle(8.0)
+    assert fake.received("DISTANCE_SENSOR") == []
+    if overrides["send_distance_sensor"]:
+        assert any("Altitude not sent" in t for _, t in rec.logs)

@@ -85,3 +85,16 @@ def no_vehicle_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(socket.socket, "sendto", sendto)
+
+
+@pytest.fixture(autouse=True)
+def widget_server_on_a_free_port(monkeypatch):
+    """Every test window serves its Cockpit widget on a free port, never the real 5425: tests run
+    side by side with a TrackShot the developer may have open."""
+    from trackshot.web import server
+    original = server.WidgetServer.__init__
+
+    def init(self, state, commands, page, port, lan=True):
+        original(self, state, commands, page, 0, False)   # ephemeral port, this computer only
+
+    monkeypatch.setattr(server.WidgetServer, "__init__", init)

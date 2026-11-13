@@ -23,12 +23,15 @@ from trackshot.config import Settings
 from trackshot.ui.panels.autopilot_panel import AutopilotPanel
 from trackshot.ui.panels.bandwidth_panel import BandwidthPanel
 from trackshot.ui.panels.capture_panel import CapturePanel
+from trackshot.ui.panels.depth_panel import DepthPanel
 from trackshot.ui.panels.log_panel import LogPanel
 from trackshot.ui.panels.preview_panel import PreviewPanel
 from trackshot.ui.panels.settings_panel import SettingsPanel
 from trackshot.ui.panels.status_panel import STATE_LEVEL, StatusPanel
 from trackshot.ui.panels.trajectory_panel import TrajectoryPanel
+from trackshot.ui.panels.widget_panel import WidgetPanel
 from trackshot.ui.theme import css, current_theme, dot_icon, value
+from trackshot.web.server import WidgetCommands, WidgetServer, WidgetState
 from trackshot.vio.source import STATE_CONNECTING, STATE_IDLE, STATE_RUNNING
 
 SOURCE_CHOICES = (("OAK camera", "oak"), ("Simulator", "sim"))
@@ -77,6 +80,15 @@ class MainWindow(QMainWindow):
         self._close_after_writes = False
         self.autopilot.writesFinished.connect(self._on_autopilot_writes_finished)
         self.capture = CapturePanel(self.record_action)
+        self.depth = DepthPanel()
+        self.widget_panel = WidgetPanel()
+        # Cockpit widget: snapshots in on the GUI thread, commands back to it through queued signals
+        self.widget_state = WidgetState()
+        self.widget_commands = WidgetCommands(self)
+        self.widget_commands.vioRequested.connect(self._on_widget_vio, Qt.ConnectionType.QueuedConnection)
+        self.widget_commands.recordRequested.connect(self._on_widget_record, Qt.ConnectionType.QueuedConnection)
+        self._widget_server: Optional[WidgetServer] = None
+        self._widget_config: Optional[tuple] = None
         self.log = LogPanel()
         self._build_toolbar()
         self._build_layout()
@@ -87,6 +99,8 @@ class MainWindow(QMainWindow):
         engine.statusUpdated.connect(self._on_status)
         engine.poseUpdated.connect(self.trajectory.add_pose)
         engine.previewUpdated.connect(self.preview.show_frame)
+        engine.statusUpdated.connect(self.widget_state.set_status)
+        engine.previewUpdated.connect(self.widget_state.set_preview)
         engine.logMessage.connect(self.log.append)
         QGuiApplication.styleHints().colorSchemeChanged.connect(self.apply_theme)
 
@@ -186,11 +200,14 @@ class MainWindow(QMainWindow):
             "bandwidth": self._dock("Bandwidth", "dock_bandwidth", self.bandwidth, bottom),
             "autopilot": self._dock("Autopilot", "dock_autopilot", self.autopilot, bottom),
             "capture": self._dock("Capture", "dock_capture", self.capture, bottom),
+            "depth": self._dock("Depth & altitude", "dock_depth", self.depth, right),
+            "widget": self._dock("Cockpit widget", "dock_widget", self._scrollable(self.widget_panel, 300), bottom),
             "log": self._dock("Log", "dock_log", self.log, bottom),
         }
         self.tabifyDockWidget(self.docks["bandwidth"], self.docks["autopilot"])
         self.tabifyDockWidget(self.docks["autopilot"], self.docks["capture"])
         self.tabifyDockWidget(self.docks["capture"], self.docks["log"])
+        self.tabifyDockWidget(self.docks["log"], self.docks["widget"])
         self.docks["bandwidth"].raise_()
         self.resizeDocks([self.docks["settings"], self.docks["status"]], [370, STATUS_DOCK_WIDTH],
                          Qt.Orientation.Horizontal)
@@ -199,6 +216,10 @@ class MainWindow(QMainWindow):
         view_menu = self.menuBar().addMenu("View")
         for dock in self.docks.values():
             view_menu.addAction(dock.toggleViewAction())
+        help_menu = self.menuBar().addMenu("Help")
+        self.widget_help_action = QAction("Add TrackShot to Cockpit…", self)
+        self.widget_help_action.triggered.connect(self.show_widget_help)
+        help_menu.addAction(self.widget_help_action)
 
     # --- Settings -------------------------------------------------------------------------------
     def apply_settings(self, settings: Settings) -> None:
@@ -248,6 +269,49 @@ class MainWindow(QMainWindow):
         self.preview.configure(s.preview_enabled, s.color_preview_enabled, est.color_preview_mbit)
         self.capture.configure(s.capture_dir, s.min_free_gb, s.center_capture_fps, s.effective_stereo_capture_fps())
         self.autopilot.set_vehicle(s.vehicle_ip)
+        self._configure_widget_server(s)
+
+    # --- Cockpit widget -------------------------------------------------------------------------
+    def _configure_widget_server(self, s: Settings) -> None:
+        """(Re)starts the widget server when its settings change."""
+        config = (s.widget_enabled, s.widget_port, s.widget_lan)
+        if config == self._widget_config:
+            return
+        self._widget_config = config
+        self._stop_widget_server()
+        if s.widget_enabled:
+            from trackshot.__main__ import resource_path
+            page = resource_path("widget.html").read_bytes()
+            self._widget_server = WidgetServer(self.widget_state, self.widget_commands, page,
+                                               s.widget_port, s.widget_lan)
+            self._widget_server.start()
+        self._show_widget_server()
+
+    def _stop_widget_server(self) -> None:
+        if self._widget_server is not None:
+            self._widget_server.stop()
+            self._widget_server = None
+
+    def _show_widget_server(self) -> None:
+        server = self._widget_server
+        self.widget_panel.show_server(bool(server and server.running), server.urls() if server else [],
+                                      server.error if server else None,
+                                      lan=bool(server and server.lan), enabled=server is not None)
+
+    def show_widget_help(self) -> None:
+        dock = self.docks["widget"]
+        dock.show()
+        dock.raise_()
+
+    def _on_widget_vio(self, run: bool) -> None:
+        """The widget's Start/Stop tracking: the same as the toolbar buttons."""
+        action = self.start_action if run else self.stop_action
+        if action.isEnabled():
+            action.trigger()
+
+    def _on_widget_record(self, on: bool) -> None:
+        if self.record_action.isChecked() != on:
+            self.record_action.setChecked(on)    # toggled → engine.set_recording, as a click does
 
     def _on_pending_changed(self, pending: Settings, est: bandwidth.BandwidthEstimate, dirty: bool) -> None:
         self.bandwidth.set_estimate(est, pending=dirty)
@@ -304,6 +368,7 @@ class MainWindow(QMainWindow):
     def _on_status(self, status: dict) -> None:
         self._update_restart_action()
         self.status_panel.update_status(status, expected_fps=float(self._applied.fps))
+        self.depth.update_status(status)
         source = status.get("source")
         self.bandwidth.set_measured(value(source, "rx_mbit"))
         snap = status.get("capture")
@@ -365,6 +430,7 @@ class MainWindow(QMainWindow):
         qs.setValue("window/geometry", self.saveGeometry())
         qs.setValue("window/state", self.saveState())
         qs.sync()
+        self._stop_widget_server()
         self.pool.clear()   # drop queued (not yet started) background tasks…
         self.autopilot.cancel_background()   # …and cut a running check short (main() waits for the pool)
         try:

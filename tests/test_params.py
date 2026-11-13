@@ -570,3 +570,42 @@ def test_an_autopilot_side_camera_rotation_is_flagged_and_cleared(fake):
     assert not rows["VISO_ORIENT"]["ok"] and rows["VISO_ORIENT"]["recommended"] == 0
     autopilot.apply(list(rows.values()))
     assert fake.params["VISO_ORIENT"] == 0.0
+
+
+RANGEFINDER = ["RNGFND1_TYPE", "RNGFND1_ORIENT", "RNGFND1_MIN", "RNGFND1_MAX", "WP_RFND_USE", "FS_TERRAIN_ENAB"]
+
+
+def test_rangefinder_rows_only_when_trackshot_is_the_rangefinder(fake):
+    autopilot = AutopilotParams(fake.http_base, timeout=1.0)
+    assert not set(RANGEFINDER) & {r["name"] for r in autopilot.check()}
+    rows = {r["name"]: r for r in autopilot.check(include_rangefinder=True)}
+    assert set(RANGEFINDER) <= set(rows)
+    # ArduPilot's defaults: no rangefinder, 0.2–7 m, disarm on terrain loss
+    assert {n: rows[n]["ok"] for n in RANGEFINDER} == {
+        "RNGFND1_TYPE": False, "RNGFND1_ORIENT": True, "RNGFND1_MIN": False, "RNGFND1_MAX": False,
+        "WP_RFND_USE": True, "FS_TERRAIN_ENAB": False}
+    assert rows["RNGFND1_TYPE"]["needs_reboot"]
+
+
+def test_rangefinder_rows_apply(fake, tmp_path):
+    autopilot = AutopilotParams(fake.http_base, timeout=1.0)
+    results = autopilot.apply(autopilot.check(include_rangefinder=True), backup=ParamBackup("ap-x", tmp_path))
+    assert all(r["ok"] for r in results)
+    assert (fake.params["RNGFND1_TYPE"], fake.params["FS_TERRAIN_ENAB"]) == (10.0, 1.0)
+    assert fake.params["RNGFND1_MIN"] == pytest.approx(0.3) and fake.params["RNGFND1_MAX"] == pytest.approx(10.0)
+    # float32 round trip: 0.3 reads back as 0.30000001 and still counts as set
+    rows = {r["name"]: r for r in autopilot.check(include_rangefinder=True)}
+    assert all(rows[n]["ok"] for n in RANGEFINDER)
+
+
+def test_hidden_rangefinder_params_say_to_set_the_type_and_reboot():
+    with FakeAutopilot(hide_viso_until_reboot=True) as fake:
+        autopilot = AutopilotParams(fake.http_base, timeout=0.3)
+        rows = {r["name"]: r for r in autopilot.check(include_rangefinder=True)}
+        assert rows["RNGFND1_MAX"]["current"] is None and rows["RNGFND1_TYPE"]["current"] == 0.0
+        results = {r["name"]: r for r in autopilot.apply(list(rows.values()))}
+        assert results["RNGFND1_TYPE"]["ok"] and results["RNGFND1_TYPE"]["needs_reboot"]
+        assert "set RNGFND1_TYPE=10 and reboot first" in results["RNGFND1_MAX"]["error"]
+        fake.reboot()
+        rows = {r["name"]: r for r in autopilot.check(include_rangefinder=True)}
+        assert rows["RNGFND1_MAX"]["current"] == pytest.approx(7.0)
